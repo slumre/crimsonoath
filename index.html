@@ -1,0 +1,2099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Crimson Oath</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #131020; }
+  #root { min-height: 100vh; }
+</style>
+<script>
+  // Standalone stand-in for the Claude-artifact window.storage API, backed by localStorage
+  // so this build works outside claude.ai (e.g. hosted on GitHub Pages). Each browser/device
+  // keeps its own separate save; there's no cross-device sync in this version.
+  window.storage = {
+    async get(key) {
+      const v = localStorage.getItem("crimson_oath_standalone::" + key);
+      if (v === null) throw new Error("not found");
+      return { key, value: v, shared: false };
+    },
+    async set(key, value) {
+      localStorage.setItem("crimson_oath_standalone::" + key, value);
+      return { key, value, shared: false };
+    },
+    async delete(key) {
+      localStorage.removeItem("crimson_oath_standalone::" + key);
+      return { key, deleted: true, shared: false };
+    },
+    async list(prefix) {
+      const keys = Object.keys(localStorage)
+        .filter((k) => k.startsWith("crimson_oath_standalone::" + (prefix || "")))
+        .map((k) => k.replace("crimson_oath_standalone::", ""));
+      return { keys, prefix, shared: false };
+    },
+  };
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+/* ============================================================
+   CRIMSON OATH — an MMO raiding guild management game
+   You are Mireille. The guild runs because you show up.
+   ============================================================ */
+
+const SAVE_KEY = "crimsonoath_v1";
+const ROSTER_CAP = 12;
+const RAID_SIZE = 10;
+const ACTIONS_PER_DAY = 2;
+
+/* ---------- palette (retro CRT guild-hall) ---------- */
+const C = {
+  bg: "#131020",
+  panel: "#1d1930",
+  panel2: "#252040",
+  border: "#3d3660",
+  borderLit: "#5a4f8a",
+  text: "#e8e0c8",
+  dim: "#9a91b8",
+  faint: "#6a6288",
+  crimson: "#e05252",
+  crimsonDark: "#8a2f2f",
+  gold: "#e8b64c",
+  green: "#5cb872",
+  blue: "#5a8fd9",
+  purple: "#a06bd4",
+  tank: "#5a8fd9",
+  healer: "#5cb872",
+  dps: "#e05252",
+};
+
+const ROLE_COLOR = { Tank: C.tank, Healer: C.healer, DPS: C.dps };
+const ROLE_ICON = { Tank: "🛡", Healer: "✚", DPS: "⚔" };
+
+/* ---------- classes & specs ---------- */
+const CLASSES = {
+  Warrior:    { color: "#c79c6e", specs: { Bladestorm: "DPS", Shieldwall: "Tank" } },
+  Arcanist:   { color: "#69ccf0", specs: { Frostweave: "DPS", Pyromancy: "DPS" } },
+  Stoneguard: { color: "#b0956b", specs: { Fortress: "Tank", Avalanche: "DPS" } },
+  Rogue:      { color: "#e8dd6a", specs: { Shadowstep: "DPS" } },
+  Cleric:     { color: "#f0ead8", specs: { Holy: "Healer", Restoration: "Healer", Shieldbearer: "Tank" } },
+  Warlock:    { color: "#9482c9", specs: { Affliction: "DPS" } },
+  Paladin:    { color: "#f58cba", specs: { Retribution: "DPS", Lightward: "Tank", Benediction: "Healer" } },
+  Ranger:     { color: "#abd473", specs: { Marksman: "DPS" } },
+  Druid:      { color: "#ff9d4a", specs: { Wildheart: "Healer", Clawshape: "Tank", Moonfang: "DPS" } },
+};
+
+/* ---------- RNG ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+let _uid = 1000;
+const uid = () => "id" + _uid++ + "_" + Math.floor(Math.random() * 1e6);
+const rnd = Math.random;
+const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ri = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+const fmt1 = (n) => (Math.round(n * 10) / 10).toString();
+
+/* ---------- weekly schedule ---------- */
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+function pickUnavailableDays() {
+  const n = rnd() < 0.55 ? 1 : 2;
+  const days = new Set();
+  while (days.size < n) days.add(ri(0, 6));
+  return Array.from(days);
+}
+
+/* ---------- name generator ---------- */
+const SYL_A = ["Xan","Vel","Mor","Thal","Bry","Kel","Ser","Dra","Fen","Lyr","Oth","Quin","Ryn","Syl","Tor","Vex","Wyn","Zar","Nim","Gral","Ash","Ild"];
+const SYL_B = ["dor","ith","wyn","ax","ora","een","ius","ka","mir","oth","ra","iss","ti","une","yx","el","on","ar","eth","ost"];
+const MEME_NAMES = ["Healsforfeels","Crithappens","Padlord","Bigpull","Notatank","Fearbomb","Dotsdotsdots","Bearbutt","Flaskless","Bankalt","Ressplease","Oomlaut","Backpedal","Clickerqueen","Petpuller","Needbeforegreed","Afkbrb","Lagspike","Keyboardturner","Torchlord","Parsegoblin","Standsinfire","Fivepercent","Bufflord","Tankn","Spellcheck","Nightpull","Gruulfriend","Wipecaller","Deadondot"];
+function genName(used) {
+  for (let i = 0; i < 60; i++) {
+    const n = rnd() < 0.42 ? pick(MEME_NAMES) : pick(SYL_A) + pick(SYL_B);
+    if (!used.has(n)) { used.add(n); return n; }
+  }
+  const n = pick(SYL_A) + pick(SYL_B) + ri(2, 99);
+  used.add(n); return n;
+}
+
+/* ---------- flavor text ---------- */
+const RECRUIT_TRAITS = [
+  "Claims to have cleared everything 'on my main'.",
+  "Application written entirely in lowercase. Ominous.",
+  "Linked logs. From 2019.",
+  "Says they 'don't do drama'. Everyone who does drama says this.",
+  "Available every night except the nights you raid.",
+  "Left last guild over 'creative differences'.",
+  "UI has 47 addons. Can see approximately none of the screen.",
+  "Signed the application with a different name than the character.",
+  "Asked about loot rules before asking about raid times.",
+  "Has a spreadsheet. Wants to show you the spreadsheet.",
+  "Previous guild 'died mysteriously'. Third guild this happened to.",
+  "Mic quality of a submarine. Great attitude though.",
+  "Answers every question with 'yeah for sure' at 2x speed.",
+  "Keybinds everything. Including things that shouldn't be keybound.",
+  "Been 'about to install a DPS meter' for two years.",
+  "Refers to themselves in third person by character name.",
+  "Plays with the sound off. All of it. Even boss abilities.",
+];
+const WIPE_LINES = [
+  "{n} stood in the fire to test a theory. The theory was wrong.",
+  "{n} pulled early. Claims it was 'lag'.",
+  "The kill order was posted, pinned, and read by nobody, especially {n}.",
+  "{n} disconnected at 4%. Reconnected at 0%.",
+  "Someone sneezed into an open mic during the countdown. Investigation ongoing.",
+  "{n} tanked it 'a new way'. There will not be a newer way.",
+  "Half the raid zoned in without consumables. The other half without pants.",
+  "{n} typed 'brb door' during the burn phase.",
+  "The mechanics were respected by everyone except {n}, who was 'watching a video'.",
+  "{n} greeded the mechanic for parse. The parse is posthumous.",
+  "A pet was left on aggressive. Nobody is naming names. It was {n}.",
+  "{n} called the wipe. Three people kept fighting out of spite.",
+];
+const GOOD_PULL_LINES = [
+  "Clean pull. Suspiciously clean. Nobody trusts it.",
+  "{n} popped everything on the pull like a professional.",
+  "Someone actually used an interrupt. Morale is confused but rising.",
+  "The healers only complained twice. A new record.",
+  "{n} carried that one and will mention it for weeks.",
+];
+const KILL_LINES = [
+  "IT DIES. The voice channel is 90% screaming, 10% loot questions.",
+  "Boss down. {n} immediately asks what dropped.",
+  "Kill screenshot taken. Four people had their UI on. It's going on the website anyway.",
+  "Dead! Someone is crying. It might be you.",
+];
+const DAILY_FLAVOR = [
+  "Trade chat is arguing about hunter loot again. You mute it.",
+  "Someone linked a fishing achievement in #general at 3am.",
+  "The guild bank has gained six stacks of low-level herbs and lost one legendary. Nobody knows how.",
+  "A level 9 whispered you asking for gold. You respect the hustle.",
+  "Jorveth posted a 900-word theorycraft in #strategy. It has one reaction: a thumbs-down from Prismara.",
+  "#off-topic is 400 messages of soup opinions. Healthy, probably.",
+  "Someone changed the guild message of the day to 'free bird solo'. You leave it.",
+  "The server forums claim your guild is 'in shambles'. The forums say this about everyone.",
+];
+
+/* ---------- bosses: The Molten Vault ---------- */
+const BOSSES = [
+  {
+    id: "vaultbreaker", name: "Vaultbreaker Hrogg", diff: 6.2, tanksNeeded: 1,
+    tag: "The one that broke Thunderkeg.",
+    blurb: "A repossession giant with a foreclosure hammer. 23 wipes and counting. He knows your names now. He uses them.",
+    pal: ["#c77b3a", "#7a4520", "#ffdd55"], seed: 11,
+    loot: ["Hrogg's Pocket Lining", "Foreclosure Notice (rolled up)", "Deed to a Smaller Vault"],
+  },
+  {
+    id: "grubloch", name: "Grubloch the Hoarder", diff: 7.3, tanksNeeded: 1,
+    tag: "He has your loot. All of it.",
+    blurb: "A dragon who sleeps on unassigned epics. Enrages when anyone touches the pile, which is the entire fight.",
+    pal: ["#5cb872", "#2e6b3f", "#e8b64c"], seed: 27,
+    loot: ["A Slightly Chewed Epic", "Grubloch's Second-Favourite Ring", "Hoard Insurance Policy"],
+  },
+  {
+    id: "custodians", name: "The Twin Custodians", diff: 8.4, tanksNeeded: 2,
+    tag: "Two bosses. Two tanks. No exceptions.",
+    blurb: "Bureaucratic constructs that must die within 10 seconds of each other or they file for restoration. Requires two tanks and one functioning raid.",
+    pal: ["#5a8fd9", "#2f4a7a", "#c8e0ff"], seed: 43,
+    loot: ["Matching Custodial Gauntlet (left)", "Matching Custodial Gauntlet (right)", "Form 27-B (Enchanted)"],
+  },
+  {
+    id: "vyxaria", name: "Empress Vyxaria, the Interest Accrued", diff: 9.4, tanksNeeded: 2,
+    tag: "The end of the tier. The start of the therapy.",
+    blurb: "The Vault's owner. Every mechanic from every previous boss, plus compound interest. Server-first race is ON.",
+    pal: ["#a06bd4", "#5a2f7a", "#ff6bd4"], seed: 77,
+    loot: ["Vyxaria's Ledger of Grudges", "Crown of Accrued Interest", "The Actual Good Trinket"],
+  },
+];
+
+/* ---------- rival guilds ---------- */
+const RIVAL_DEFS = [
+  { name: "The Spreadsheet", power: 9.4, vibe: "Optimises fun out of everything, including fun." },
+  { name: "Mandatory Fun", power: 8.7, vibe: "Attendance policy longer than the raid." },
+  { name: "No Flask No Pull", power: 8.2, vibe: "Kicked someone for the wrong potion once." },
+  { name: "Ninety Percent Wipe", power: 7.6, vibe: "Peaked in a previous expansion. Won't stop mentioning it." },
+  { name: "Loot Council of War", power: 7.4, vibe: "The council is three friends and a shared bank alt." },
+  { name: "Dads of Destruction", power: 6.9, vibe: "Raids end 9pm sharp. Terrifyingly efficient until then." },
+  { name: "Casual Encounters", power: 6.4, vibe: "'Semi-hardcore', which means neither." },
+  { name: "The Bench", power: 6.1, vibe: "Fifteen rostered. Ten seats. Endless politics." },
+  { name: "Weekend Warriors", power: 5.7, vibe: "Two 8-hour raids. Nothing in between. Chaos." },
+  { name: "Delete Your Alt", power: 5.3, vibe: "Recruiting mains only. Everyone applied on an alt." },
+  { name: "Soup Kitchen", power: 4.8, vibe: "Genuinely lovely. Genuinely 4.8 power." },
+  { name: "xX Nightblood Xx", power: 4.2, vibe: "Founded last Tuesday. Very confident." },
+];
+
+/* ---------- the wider world: guilds beyond your own server ---------- */
+const WORLD_GUILD_DEFS = [
+  { name: "Zero Hour", power: 11.4 }, { name: "Deja Vu Progression", power: 10.8 },
+  { name: "The Denominator", power: 10.3 }, { name: "Couch Coop", power: 9.9 },
+  { name: "Alt+F4", power: 9.5 }, { name: "Nerf This", power: 9.1 },
+  { name: "Autopilot Engaged", power: 8.7 }, { name: "Backline Betrayal", power: 8.3 },
+  { name: "Push Through It", power: 7.9 }, { name: "Fashion Raid Only", power: 7.5 },
+  { name: "Gearscore Goblins", power: 7.1 }, { name: "Lagged Behind", power: 6.7 },
+  { name: "Two Man Band (of 10)", power: 6.3 }, { name: "We Tried Our Best", power: 5.9 },
+  { name: "Alt Army", power: 5.5 }, { name: "Actually Reading Tooltips", power: 5.1 },
+  { name: "Speedrun Denied", power: 4.7 }, { name: "Cooldown Confusion", power: 4.3 },
+  { name: "Mostly AFK", power: 3.9 }, { name: "Fresh Server Who Dis", power: 3.5 },
+];
+
+/* ============================================================
+   PIXEL ART
+   ============================================================ */
+const SKIN_TONES = ["#e8b88a", "#c98d5e", "#9a6a42", "#6a4a30", "#b8c8a0", "#9aa8c8", "#c8a0b8"];
+const HAIR_TONES = ["#2a2020", "#5a3a20", "#c8a050", "#d8d8d0", "#a03030", "#4a3a6a", "#3a6a4a", "#e07030"];
+
+/* draw a 16x16 seeded portrait onto ctx */
+function drawPortrait(ctx, seed, clsColor, px) {
+  const r = mulberry32(seed);
+  const P = (x, y, w, h, col) => { ctx.fillStyle = col; ctx.fillRect(x * px, y * px, w * px, h * px); };
+  const skin = SKIN_TONES[Math.floor(r() * SKIN_TONES.length)];
+  const hair = HAIR_TONES[Math.floor(r() * HAIR_TONES.length)];
+  const shade = "#00000055";
+  // background: dark tinted by class
+  P(0, 0, 16, 16, "#171325");
+  ctx.fillStyle = clsColor + "22"; ctx.fillRect(0, 0, 16 * px, 16 * px);
+  P(0, 0, 16, 1, clsColor + "44"); P(0, 15, 16, 1, "#00000066");
+  // shoulders / armor
+  const armor = clsColor;
+  P(2, 12, 12, 4, armor);
+  P(2, 12, 12, 1, "#ffffff33");
+  P(6, 12, 4, 4, "#00000044"); // chest shadow under chin
+  // head
+  P(5, 4, 6, 7, skin);
+  P(5, 10, 6, 1, shade);
+  // ears (chance of pointy)
+  if (r() < 0.35) { P(4, 5, 1, 2, skin); P(11, 5, 1, 2, skin); P(4, 4, 1, 1, skin); P(11, 4, 1, 1, skin); }
+  else { P(4, 6, 1, 2, skin); P(11, 6, 1, 2, skin); }
+  // hair style
+  const style = Math.floor(r() * 5);
+  if (style === 0) { P(4, 2, 8, 2, hair); P(4, 4, 1, 3, hair); P(11, 4, 1, 3, hair); } // bob
+  else if (style === 1) { P(4, 2, 8, 2, hair); P(4, 4, 1, 8, hair); P(11, 4, 1, 8, hair); } // long
+  else if (style === 2) { for (let i = 0; i < 5; i++) P(4 + i * 2 - (i > 1 ? 1 : 0), 1 + (i % 2), 1, 2, hair); P(4, 3, 8, 1, hair); } // spiky
+  else if (style === 3) { P(5, 3, 6, 1, hair); } // buzz
+  // style 4 = bald
+  // hood chance for casters
+  if (r() < 0.28) { P(3, 1, 10, 2, "#2a2438"); P(3, 3, 1, 6, "#2a2438"); P(12, 3, 1, 6, "#2a2438"); }
+  // eyes
+  const eyeCol = r() < 0.2 ? clsColor : "#1a1420";
+  P(6, 6, 1, 1, eyeCol); P(9, 6, 1, 1, eyeCol);
+  P(6, 7, 1, 1, "#ffffff22"); P(9, 7, 1, 1, "#ffffff22");
+  // brows
+  if (r() < 0.7) { P(6, 5, 2, 1, hair === skin ? "#2a2020" : hair); P(9, 5, 1, 1, hair === skin ? "#2a2020" : hair); }
+  // mouth
+  const mood = r();
+  if (mood < 0.35) P(7, 9, 2, 1, "#5a3030"); // flat
+  else if (mood < 0.6) { P(7, 9, 1, 1, "#5a3030"); P(8, 8, 1, 1, "#5a3030"); } // smirk
+  else P(7, 9, 2, 1, "#3a2020");
+  // beard
+  if (r() < 0.3) { P(5, 9, 6, 2, hair); P(6, 8, 1, 1, hair); P(9, 8, 1, 1, hair); }
+  // scar
+  if (r() < 0.22) { P(10, 6, 1, 3, "#a05050"); }
+  // helmet chance
+  if (r() < 0.18) { P(4, 1, 8, 3, "#7a7a8a"); P(4, 4, 1, 2, "#7a7a8a"); P(11, 4, 1, 2, "#7a7a8a"); P(4, 1, 8, 1, "#b8b8c8"); }
+}
+
+function Portrait({ seed, clsColor, size = 48, style }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const cv = ref.current; if (!cv) return;
+    const px = 4; cv.width = 16 * px; cv.height = 16 * px;
+    const ctx = cv.getContext("2d");
+    drawPortrait(ctx, seed, clsColor, px);
+  }, [seed, clsColor]);
+  return (
+    <canvas ref={ref} style={{ width: size, height: size, imageRendering: "pixelated", border: "2px solid " + C.border, background: "#171325", flexShrink: 0, ...style }} />
+  );
+}
+
+/* draw a big seeded boss sprite (symmetric blob monster) */
+function drawBoss(ctx, boss, px, frame = 0, hurt = false) {
+  const r = mulberry32(boss.seed);
+  const G = 22;
+  const grid = [];
+  for (let y = 0; y < G; y++) { grid.push(new Array(G).fill(0)); }
+  // body blob (symmetric)
+  for (let y = 4; y < G - 1; y++) {
+    for (let x = 0; x < G / 2; x++) {
+      const cx = G / 2 - x, cy = Math.abs(y - 13);
+      const p = 1 - (cx * cx) / 90 - (cy * cy) / 80;
+      if (r() < p) { grid[y][x] = 1; grid[y][G - 1 - x] = 1; }
+    }
+  }
+  // horns
+  const hornH = 2 + Math.floor(r() * 4);
+  for (let i = 0; i < hornH; i++) { grid[4 - Math.min(i, 3)][5 + i] = 2; grid[4 - Math.min(i, 3)][G - 6 - i] = 2; }
+  // arms
+  for (let i = 0; i < 4; i++) { grid[10 + i][1] = 1; grid[10 + i][G - 2] = 1; }
+  grid[14][0] = 2; grid[14][G - 1] = 2;
+  const bob = frame % 2 === 0 ? 0 : 1;
+  const P = (x, y, col) => { ctx.fillStyle = col; ctx.fillRect(x * px, (y + bob) * px, px, px); };
+  const [main, dark, glow] = boss.pal;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+    if (grid[y][x] === 1) P(x, y, hurt ? "#ffffff" : (y > 13 ? dark : main));
+    if (grid[y][x] === 2) P(x, y, hurt ? "#ffffff" : glow);
+  }
+  // eyes
+  ctx.fillStyle = hurt ? "#ff0000" : glow;
+  ctx.fillRect(8 * px, (8 + bob) * px, px * 2, px * 2);
+  ctx.fillRect(12 * px, (8 + bob) * px, px * 2, px * 2);
+  ctx.fillStyle = "#000";
+  ctx.fillRect((8 + (frame % 4 < 2 ? 0 : 1)) * px, (9 + bob) * px, px, px);
+  ctx.fillRect((12 + (frame % 4 < 2 ? 0 : 1)) * px, (9 + bob) * px, px, px);
+  // mouth
+  ctx.fillStyle = dark;
+  ctx.fillRect(9 * px, (12 + bob) * px, px * 4, px);
+}
+
+/* mini raider sprite for the raid scene */
+function drawRaider(ctx, x, y, p, frame, castFlash) {
+  const r = mulberry32(p.portraitSeed);
+  const skin = SKIN_TONES[Math.floor(r() * SKIN_TONES.length)];
+  const hair = HAIR_TONES[Math.floor(r() * HAIR_TONES.length)];
+  const role = ROLE_COLOR[p.role];
+  const s = 3; // pixel size
+  const bob = (frame + (p.portraitSeed % 3)) % 2;
+  const P = (dx, dy, w, h, col) => { ctx.fillStyle = col; ctx.fillRect(x + dx * s, y + (dy + bob) * s, w * s, h * s); };
+  P(1, -1, 3, 1, hair);
+  P(1, 0, 3, 2, skin);
+  P(0, 2, 5, 4, role);
+  P(0, 2, 5, 1, "#ffffff33");
+  P(1, 6, 1, 2, "#2a2438"); P(3, 6, 1, 2, "#2a2438");
+  if (p.role === "Tank") { P(-1, 2, 1, 4, "#b8b8c8"); }
+  if (p.role === "DPS") { P(5, 1, 1, 4, "#d8d8d0"); }
+  if (p.role === "Healer" && frame % 8 < 4) { P(2, -3, 1, 1, "#aaffaa"); }
+  if (castFlash) { ctx.fillStyle = role + "88"; ctx.fillRect(x - 2, y - 8, 21, 6); }
+}
+
+/* ============================================================
+   GAME STATE
+   ============================================================ */
+function mkPlayer(o) {
+  return {
+    id: uid(),
+    name: o.name, cls: o.cls, spec: o.spec,
+    role: CLASSES[o.cls].specs[o.spec],
+    portraitSeed: o.seed ?? ri(1, 999999),
+    roleSkill: o.roleSkill, mech: o.mech ?? clamp(o.roleSkill + ri(-2, 1), 1, 10),
+    reliability: o.reliability, ego: o.ego,
+    coachability: o.coachability ?? ri(2, 9),
+    toxicity: o.toxicity ?? ri(1, 6),
+    loyalty: o.loyalty ?? ri(3, 9),
+    commitment: o.commitment ?? ri(3, 9),
+    adaptability: o.adaptability ?? ri(2, 8),
+    known: o.known ?? { coachability: false, toxicity: false, loyalty: false, commitment: false, mech: true },
+    morale: o.morale ?? ri(50, 70),
+    gear: o.gear ?? ri(3, 5),
+    lootCount: 0,
+    trait: o.trait ?? pick(RECRUIT_TRAITS),
+    isPlayer: !!o.isPlayer,
+    trial: !!o.trial,
+    joinedDay: o.joinedDay ?? 1,
+    origin: o.origin ?? "local",
+    unavailableDays: o.unavailableDays ?? (o.isPlayer ? [] : pickUnavailableDays()),
+  };
+}
+
+/* small jitter so restarts feel fresh without changing the overall power level */
+const jit = (v, amt = 1) => clamp(Math.round(v + ri(-amt, amt)), 1, 10);
+const jitGear = (v) => clamp(Math.round(v + ri(-1, 1)), 2, 8);
+
+function startingRoster(playerName) {
+  const K = { coachability: true, toxicity: true, loyalty: true, commitment: true, mech: true }; // veterans: mostly known
+  const K2 = { coachability: true, toxicity: false, loyalty: false, commitment: true, mech: true };
+  const base = [
+    { name: playerName || "Mireille", cls: "Cleric", spec: "Holy", roleSkill: 5, mech: 6, reliability: 10, ego: 2, coachability: 9, toxicity: 1, loyalty: 10, commitment: 10, adaptability: 9, morale: 55, gear: 5, seed: ri(1, 999999), isPlayer: true, known: K, trait: "New GL. Tired. Shows up anyway. Every time. For everything." },
+    { name: "Daxon", cls: "Warrior", spec: "Bladestorm", roleSkill: 8, mech: 8, reliability: 6, ego: 8, coachability: 4, toxicity: 5, loyalty: 4, commitment: 7, adaptability: 3, morale: 38, gear: 6, seed: ri(1, 999999), known: K2, trait: "Thunderkeg's mate. Currently sulking in lowercase." },
+    { name: "Prismara", cls: "Arcanist", spec: "Frostweave", roleSkill: 9, mech: 9, reliability: 7, ego: 9, coachability: 3, toxicity: 4, loyalty: 5, commitment: 8, adaptability: 2, morale: 45, gear: 7, seed: ri(1, 999999), known: K2, trait: "Thinks she should be GL. Says so. Often. In #general." },
+    { name: "Boulderback", cls: "Stoneguard", spec: "Fortress", roleSkill: 7, mech: 6, reliability: 8, ego: 4, coachability: 7, toxicity: 2, loyalty: 8, commitment: 8, adaptability: 5, morale: 62, gear: 6, seed: ri(1, 999999), known: K, trait: "Solid. Quietly relieved Thunderkeg's gone." },
+    { name: "Fennick", cls: "Rogue", spec: "Shadowstep", roleSkill: 7, mech: 8, reliability: 4, ego: 5, coachability: 6, toxicity: 3, loyalty: 7, commitment: 5, adaptability: 6, morale: 58, gear: 5, seed: ri(1, 999999), known: K, trait: "Chronically late. Blames 'lag'. Lag does not work that way." },
+    { name: "Thessaly", cls: "Cleric", spec: "Restoration", roleSkill: 6, mech: 6, reliability: 9, ego: 3, coachability: 8, toxicity: 1, loyalty: 9, commitment: 8, adaptability: 7, morale: 48, gear: 5, seed: ri(1, 999999), known: K, trait: "Your ally. Exhausted. Healer brain: fully developed." },
+    { name: "Vornax", cls: "Warlock", spec: "Affliction", roleSkill: 8, mech: 7, reliability: 5, ego: 6, coachability: 5, toxicity: 3, loyalty: 6, commitment: 4, adaptability: 3, morale: 50, gear: 6, seed: ri(1, 999999), known: K2, trait: "Logs off without a word. Reappears. Repeat." },
+    { name: "Jorveth", cls: "Paladin", spec: "Retribution", roleSkill: 5, mech: 5, reliability: 9, ego: 7, coachability: 6, toxicity: 2, loyalty: 8, commitment: 9, adaptability: 4, morale: 60, gear: 5, seed: ri(1, 999999), known: K, trait: "Theorycrafter. Wrong. Won't stop. Attendance: immaculate." },
+  ];
+  return base.map((o, i) => mkPlayer({
+    ...o,
+    known: { ...o.known },
+    // light jitter keeps roughly the same overall level but not identical run to run;
+    // the player's reliability/ego/loyalty/commitment stay fixed (core to who she is)
+    roleSkill: jit(o.roleSkill), mech: jit(o.mech), gear: jitGear(o.gear),
+    reliability: i === 0 ? o.reliability : jit(o.reliability),
+    ego: i === 0 ? o.ego : jit(o.ego),
+    coachability: jit(o.coachability), toxicity: jit(o.toxicity, i === 0 ? 0 : 1),
+    loyalty: i === 0 ? o.loyalty : jit(o.loyalty), commitment: i === 0 ? o.commitment : jit(o.commitment),
+    adaptability: jit(o.adaptability), morale: clamp(o.morale + ri(-4, 4), 5, 95),
+  }));
+}
+
+const TRANSFER_NOTES = [
+  "Transferring off a dying server. Logs check out; local reputation is a blank slate.",
+  "Server-hopping for a fresh start. Their old guild's kill list is legit. Their gear is not.",
+  "Realm-transferred last week. Skilled, undergeared, and a little homesick for their old raid team.",
+];
+
+function genApplicant(day, culture, used, forceTransfer) {
+  const cls = pick(Object.keys(CLASSES));
+  const spec = pick(Object.keys(CLASSES[cls].specs));
+  const isTransfer = forceTransfer ?? rnd() < 0.22;
+  // culture: -100 chill .. +100 hardcore
+  const skillBase = clamp(4 + culture / 40 + rnd() * 4, 1, 10);
+  const p = mkPlayer({
+    name: genName(used), cls, spec,
+    roleSkill: isTransfer ? clamp(Math.round(ri(6, 10) + rnd() * 1), 1, 10) : Math.round(clamp(skillBase + ri(-1, 2), 1, 10)),
+    reliability: ri(2, 10),
+    ego: clamp(ri(2, 9) + (culture > 30 ? 1 : 0), 1, 10),
+    toxicity: clamp(ri(1, 8) - (culture < -30 ? 2 : 0), 1, 10),
+    gear: isTransfer ? ri(1, 3) : ri(3, 5),
+    joinedDay: day, trial: true, origin: isTransfer ? "transfer" : "local",
+    known: { coachability: false, toxicity: false, loyalty: false, commitment: false, mech: false },
+  });
+  return {
+    id: uid(), player: p, day,
+    linkedLogs: isTransfer ? false : rnd() < 0.65,
+    askedAround: false,
+    expires: day + ri(4, 7),
+    note: isTransfer ? pick(TRANSFER_NOTES) : pick(RECRUIT_TRAITS),
+  };
+}
+
+function initialState(playerName) {
+  const pname = (playerName && playerName.trim().slice(0, 18)) || "Mireille";
+  const used = new Set([pname, "Daxon","Prismara","Boulderback","Fennick","Thessaly","Vornax","Jorveth","Thunderkeg"]);
+  const roster = startingRoster(pname);
+  const rivals = RIVAL_DEFS.map((r, i) => ({
+    ...r, id: "rv" + i, kills: r.power > 8.5 ? 1 : 0, lastKillDay: r.power > 8.5 ? 0 : -1,
+    heat: 0, poachCooldown: 0,
+    star: null, // lazily generated poachable player
+  }));
+  // the wider world: far more guilds than your own server, many already well ahead —
+  // being #1 on your server doesn't mean you're #1 anywhere else
+  const worldGuilds = WORLD_GUILD_DEFS.map((r, i) => ({
+    ...r, id: "wg" + i,
+    kills: clamp(Math.floor((r.power - 5.5) / 1.2), 0, BOSSES.length),
+    lastKillDay: r.power > 6 ? -ri(1, 15) : -1,
+    heat: 0, poachCooldown: 0,
+  }));
+  const bosses = BOSSES.map((b) => ({ ...b, killed: false, killedThisWeek: false, killedDay: -1, attempts: b.id === "vaultbreaker" ? 23 : 0, learning: b.id === "vaultbreaker" ? 6 : 0, bestPull: b.id === "vaultbreaker" ? 34 : 0 }));
+  return {
+    v: 1, day: 1, actions: ACTIONS_PER_DAY, playerName: pname,
+    culture: 0, // -100 chill .. +100 hardcore
+    schedule: { main: [1, 4], optional: [6] }, // Tue & Fri main, Sun optional (Mon=0)
+    roster, applicants: [genApplicant(1, 0, used), genApplicant(1, 0, used)],
+    usedNames: Array.from(used),
+    rivals, worldGuilds, bosses,
+    notifications: openingNotifications(),
+    log: [
+      { day: 1, kind: "story", text: "Thunderkeg has left the guild. His parting message is still pinned in #general." },
+      { day: 1, kind: "story", text: `You have been voted Guild Leader of Crimson Oath. The vote was 7–0. You did not run.` },
+    ],
+    raidedToday: false,
+    availabilityDay: -1, availability: {},
+    pinnedDismissed: false,
+    thunderkegReturned: false,
+    tierClearedShown: false,
+    seenIntro: false,
+    lootDebt: {}, // playerId -> unfulfilled wishes counter (envy fuel)
+  };
+}
+
+function openingNotifications() {
+  return [
+    { id: uid(), day: 1, type: "opening_prismara", icon: "😤", title: "Prismara: 'so are we pretending that vote was real'",
+      text: "Prismara whispers you. She wants to know your plan for Vaultbreaker, and whether you're 'actually going to lead or just heal and hope'.",
+      choices: [
+        { id: "firm", label: "\"I have a plan. Be there Tuesday.\" (assert authority)" },
+        { id: "listen", label: "Ask for her input on the strategy (share power)" },
+        { id: "ignore", label: "Leave her on read (bold)" },
+      ] },
+    { id: uid(), day: 1, type: "opening_daxon", icon: "😶", title: "Daxon has gone quiet",
+      text: "Daxon was Thunderkeg's right hand. He's been online for 6 hours, parked on a mailbox, saying nothing. His resignation is loading, unless you do something.",
+      choices: [
+        { id: "reach", label: "Reach out privately, no pressure" },
+        { id: "space", label: "Give him space, he'll come around" },
+      ] },
+    { id: uid(), day: 1, type: "opening_culture", icon: "📜", title: "Rewrite the guild message of the day",
+      text: "The MOTD still says 'WIPE 23. I'M DONE. — TK'. What does Crimson Oath stand for now? This will shape who applies.",
+      choices: [
+        { id: "hardcore", label: "\"Progression first. Bring flasks or bring excuses.\" (hardcore)" },
+        { id: "balanced", label: "\"We kill bosses and we keep our friends.\" (balanced)" },
+        { id: "chill", label: "\"Bosses die eventually. Vibes are forever.\" (chill)" },
+      ] },
+    { id: uid(), day: 1, type: "opening_fennick", icon: "🕐", title: "Fennick: 'yo quick q'",
+      text: "Fennick asks if raid invites can go out 'like 15 mins later' because of 'a thing'. The thing is that he is always late.",
+      choices: [
+        { id: "no", label: "\"Invites are invites. Be on time.\"" },
+        { id: "yes", label: "\"Fine. 15 minutes.\" (the healers will hear of this)" },
+      ] },
+  ];
+}
+
+/* ============================================================
+   SIMULATION
+   ============================================================ */
+function computePullBudget(lineup) {
+  const nonPlayers = lineup.filter((p) => !p.isPlayer);
+  const avgCommit = nonPlayers.length ? nonPlayers.reduce((a, p) => a + p.commitment, 0) / nonPlayers.length : 6;
+  return clamp(Math.round(4 + avgCommit * 0.6), 4, 11);
+}
+
+function teamPower(lineup, mireilleSpec) {
+  if (lineup.length === 0) return { power: 0, warnings: ["No raiders."], tanks: 0, healers: 0, dps: 0 };
+  let sum = 0, tanks = 0, healers = 0, dps = 0, moraleSum = 0;
+  for (const p of lineup) {
+    const role = p.isPlayer ? CLASSES.Cleric.specs[mireilleSpec] : p.role;
+    if (role === "Tank") tanks++; else if (role === "Healer") healers++; else dps++;
+    // scaled to land ~5..10 for skill/gear 1..10, matching boss diff (6.2..9.4) and rival power (3..11) scale
+    sum += p.roleSkill * 0.5 + p.mech * 0.3 + p.gear * 0.2;
+    moraleSum += p.morale;
+  }
+  let power = sum / lineup.length;
+  const avgMorale = moraleSum / lineup.length;
+  power += (avgMorale - 50) / 45; // morale swing ~±1.1
+  const warnings = [];
+  if (lineup.length < RAID_SIZE) { power -= (RAID_SIZE - lineup.length) * 0.28; warnings.push(`Short-handed: ${lineup.length}/${RAID_SIZE}.`); }
+  if (healers < 2) { power -= (2 - healers) * 0.65; warnings.push("Not enough healers. The floor will be busy."); }
+  if (dps < 4) { power -= (4 - dps) * 0.3; warnings.push("Low damage. Bring snacks, this will take a while."); }
+  return { power, warnings, tanks, healers, dps, avgMorale };
+}
+
+function simAttempt(lineup, mireilleSpec, boss, attemptNo, nightHP) {
+  const tp = teamPower(lineup, mireilleSpec);
+  let power = tp.power;
+  if (tp.tanks < boss.tanksNeeded) power -= (boss.tanksNeeded - tp.tanks) * 1.4;
+  power += boss.learning * 0.12;
+  const eff = power + (rnd() * 3 - 1.5) - attemptNo * 0.12;
+  const margin = eff - boss.diff;
+  let dmg = 0, quality;
+  if (margin > 1.1) { dmg = 34 + rnd() * 22; quality = "great"; }
+  else if (margin > 0) { dmg = 16 + rnd() * 16; quality = "good"; }
+  else if (margin > -1.1) { dmg = 4 + rnd() * 10; quality = "progress"; }
+  else { dmg = rnd() * 4; quality = "wipe"; }
+  dmg = Math.round(dmg);
+  const kill = nightHP - dmg <= 0;
+  // pick a highlight raider
+  const nonPlayer = lineup.filter((p) => !p.isPlayer);
+  const pool = nonPlayer.length ? nonPlayer : lineup;
+  let star, goat;
+  if (quality === "wipe" || quality === "progress") {
+    goat = pool.slice().sort((a, b) => (a.mech + a.reliability + rnd() * 8) - (b.mech + b.reliability + rnd() * 8))[0];
+  } else {
+    star = pool.slice().sort((a, b) => (b.mech + rnd() * 6) - (a.mech + rnd() * 6))[0];
+  }
+  let line;
+  if (kill) line = pick(KILL_LINES).replace("{n}", (star || pick(pool)).name);
+  else if (quality === "wipe") line = pick(WIPE_LINES).replace("{n}", goat.name);
+  else if (quality === "progress") line = pick(WIPE_LINES).replace("{n}", goat.name);
+  else line = pick(GOOD_PULL_LINES).replace("{n}", (star || pick(pool)).name);
+  return { dmg, quality, kill, line, starId: star?.id, goatId: goat?.id };
+}
+
+function weekdayOf(day) { return (day - 1) % 7; }
+function scheduleKind(schedule, weekday) {
+  if (schedule.main.includes(weekday)) return "main";
+  if (schedule.optional.includes(weekday)) return "optional";
+  return "none";
+}
+function rollAvailability(roster, day, schedule) {
+  const weekday = weekdayOf(day);
+  const kind = scheduleKind(schedule || { main: [], optional: [] }, weekday);
+  const out = {};
+  for (const p of roster) {
+    if (p.isPlayer) { out[p.id] = "in"; continue; }
+    let showChance = 0.5 + p.reliability * 0.04 + p.morale / 450;
+    if (kind === "main") showChance += 0.18;
+    else if (kind === "optional") showChance += 0.03 - (10 - p.commitment) * 0.02;
+    else showChance -= 0.30; // raiding on an unscheduled day — most people just aren't around
+    if (p.unavailableDays && p.unavailableDays.includes(weekday)) showChance -= 0.55;
+    showChance = clamp(showChance, 0.03, 0.97);
+    const r = rnd();
+    if (r < showChance) out[p.id] = "in";
+    else if (r < showChance + 0.12) out[p.id] = "late";
+    else out[p.id] = "out";
+  }
+  return out;
+}
+
+const OUT_EXCUSES = ["offline. No message. Classic.", "says the power is out. Their character is standing in a capital city.", "has 'a family thing'. Third this month.", "is 'five minutes away' (geographically unclear).", "posted a single 'cant' in #raids."];
+
+/* generate loot for a boss kill */
+function rollLoot(boss) {
+  const n = ri(1, 2) + (boss.id === "vyxaria" ? 1 : 0);
+  const items = [];
+  const names = boss.loot.slice().sort(() => rnd() - 0.5);
+  for (let i = 0; i < n && i < names.length; i++) {
+    const roles = pick([["Tank"], ["Healer"], ["DPS"], ["DPS"], ["Tank", "DPS"], ["Healer", "DPS"]]);
+    items.push({ id: uid(), name: names[i], roles, quality: rnd() < 0.25 ? "legendary" : "epic" });
+  }
+  return items;
+}
+
+/* ---------- daily tick: drama, rivals, applicants ---------- */
+function nextDayTick(s) {
+  const st = structuredClone(s);
+  st.day += 1;
+  st.actions = ACTIONS_PER_DAY;
+  st.raidedToday = false;
+  const used = new Set(st.usedNames);
+  const newNotifs = [];
+  const log = (text, kind = "event") => st.log.unshift({ day: st.day, kind, text });
+
+  // weekly raid lockout reset
+  if (weekdayOf(st.day) === 0) {
+    const hadLocks = st.bosses.some((b) => b.killedThisWeek);
+    for (const b of st.bosses) b.killedThisWeek = false;
+    if (hadLocks) log("New raid week. Every boss lockout has reset — the Vault is fair game again. [all bosses unlocked for pulls]", "story");
+  }
+
+  // morale drift toward 55, trial flag expiry
+  for (const p of st.roster) {
+    if (p.morale < 55) p.morale = Math.min(55, p.morale + 2);
+    else if (p.morale > 55) p.morale = Math.max(55, p.morale - 1);
+    if (p.trial && st.day - p.joinedDay >= 7) { p.trial = false; log(`${p.name} passed their trial. Probably. Nobody remembered to discuss it, so: passed.`); }
+    // time reveals stats
+    if (!p.known.commitment && rnd() < 0.08) { p.known.commitment = true; }
+    if (!p.known.loyalty && rnd() < 0.05) { p.known.loyalty = true; }
+  }
+
+  // drama generation (max 2/day)
+  let dramaBudget = 2;
+  const nonPlayers = st.roster.filter((p) => !p.isPlayer);
+  // toxicity incident
+  if (dramaBudget > 0) {
+    const tox = nonPlayers.filter((p) => p.toxicity >= 7 && rnd() < 0.13);
+    if (tox.length) {
+      const t = tox[0];
+      const victims = nonPlayers.filter((p) => p.id !== t.id);
+      const v = victims.length ? pick(victims) : null;
+      t.known.toxicity = true;
+      if (v) v.morale = clamp(v.morale - 10, 0, 100);
+      newNotifs.push({ id: uid(), day: st.day, type: "toxic_incident", icon: "🧨", targetId: t.id, extraId: v?.id,
+        title: `${t.name} went off in #general`,
+        text: `${t.name} publicly flamed ${v ? v.name : "the healers"} over last raid's numbers. Screenshots are circulating. ${v ? v.name + " has gone quiet." : ""}`,
+        choices: [
+          { id: "warn", label: "Formal warning in private" },
+          { id: "kick", label: "Remove them from the guild" },
+          { id: "ignore", label: "Pretend you didn't see it" },
+        ] });
+      dramaBudget--;
+    }
+  }
+  // loot envy
+  if (dramaBudget > 0) {
+    const envy = nonPlayers.filter((p) => p.ego >= 7 && (st.lootDebt[p.id] || 0) >= 2 && rnd() < 0.35);
+    if (envy.length) {
+      const e = envy[0];
+      newNotifs.push({ id: uid(), day: st.day, type: "loot_envy", icon: "💎", targetId: e.id,
+        title: `${e.name} 'just wants to talk about loot distribution'`,
+        text: `${e.name} has passed on loot ${st.lootDebt[e.id]} times now and has produced a document about it. With headings.`,
+        choices: [
+          { id: "promise", label: "Promise them priority on the next drop" },
+          { id: "explain", label: "Explain loot goes where it helps the guild" },
+          { id: "dismiss", label: "\"It's pixels, mate.\" (it is not just pixels)" },
+        ] });
+      dramaBudget--;
+    }
+  }
+  // rival poach attempt on your player
+  if (dramaBudget > 0 && rnd() < 0.10) {
+    const targets = nonPlayers.filter((p) => p.roleSkill >= 7);
+    const better = st.rivals.filter((r) => r.kills >= st.bosses.filter((b) => b.killed).length);
+    if (targets.length && better.length) {
+      const t = pick(targets), r = pick(better);
+      t.known.loyalty = true;
+      newNotifs.push({ id: uid(), day: st.day, type: "poach_attempt", icon: "🎣", targetId: t.id, rivalId: r.id,
+        title: `${r.name} is sniffing around ${t.name}`,
+        text: `${t.name} forwarded you a recruitment whisper from <${r.name}>. ${t.loyalty >= 7 ? "They forwarded it immediately. Good sign." : "They forwarded it... after three days. Hm."}`,
+        choices: [
+          { id: "counter", label: "Make them feel valued (takes real effort)" },
+          { id: "trust", label: "\"I trust you to decide.\" (loyalty test)" },
+          { id: "confront", label: "Tell the rival GL to back off (spicy)" },
+        ] });
+      dramaBudget--;
+    }
+  }
+  // IRL event
+  if (dramaBudget > 0 && rnd() < 0.09) {
+    const t = pick(nonPlayers);
+    if (t) {
+      t.commitment = clamp(t.commitment - 2, 1, 10);
+      t.known.commitment = true;
+      newNotifs.push({ id: uid(), day: st.day, type: "irl_event", icon: "🌍", targetId: t.id,
+        title: `${t.name}: 'so, real life update'`,
+        text: pick([
+          `${t.name} got a new job. The hours are 'flexible', which means terrible.`,
+          `${t.name} is moving flats. Their internet will be 'sorted soon'. Historians disagree.`,
+          `${t.name} adopted a dog. Raid audio now features a dog.`,
+        ]),
+        choices: [
+          { id: "support", label: "\"Real life first. Seat's here when you're on.\"" },
+          { id: "pressure", label: "\"We need you Tuesday though.\" (hardcore)" },
+        ] });
+      dramaBudget--;
+    }
+  }
+  // quitting risk
+  for (const p of nonPlayers) {
+    if (p.morale <= 15 && rnd() < 0.4) {
+      st.roster = st.roster.filter((x) => x.id !== p.id);
+      log(`${p.name} has left the guild. Their farewell post was one word: 'gg'.`, "bad");
+    }
+  }
+
+  // Thunderkeg returns
+  if (!st.thunderkegReturned && st.day >= 10 && st.roster.length < ROSTER_CAP && rnd() < 0.25) {
+    st.thunderkegReturned = true;
+    newNotifs.push({ id: uid(), day: st.day, type: "thunderkeg", icon: "⛏",
+      title: "Thunderkeg wants back in",
+      text: "The former GL applies to his own former guild. Application note: 'i said things. the boss said things. we move.' He's still an 8/10 tank with a 10/10 ego.",
+      choices: [
+        { id: "accept", label: "Take him back (skill is skill)" },
+        { id: "decline", label: "Decline politely (peace is also skill)" },
+      ] });
+  }
+
+  // applicants churn
+  st.applicants = st.applicants.filter((a) => {
+    if (st.day > a.expires) { log(`Applicant ${a.player.name} got bored waiting and joined <${pick(RIVAL_DEFS).name}>.`); return false; }
+    return true;
+  });
+  if (st.applicants.length < 6 && rnd() < 0.5) {
+    st.applicants.push(genApplicant(st.day, st.culture, used));
+  }
+  if (st.day % 6 === 0 && st.applicants.length < 8 && !st.applicants.some((a) => a.player.origin === "transfer")) {
+    st.applicants.push(genApplicant(st.day, st.culture, used, true));
+    log("A server-transfer application landed in the recruitment channel. Skilled. Undergeared. Homesick.", "event");
+  }
+  st.usedNames = Array.from(used);
+
+  // rivals progress
+  const openBosses = st.bosses.length;
+  for (const r of st.rivals) {
+    if (r.poachCooldown > 0) r.poachCooldown--;
+    if (r.kills < openBosses) {
+      const target = st.bosses[r.kills];
+      const chance = clamp((r.power - target.diff) * 0.10 + 0.05, 0.005, 0.30);
+      if (rnd() < chance) {
+        r.kills++; r.lastKillDay = st.day;
+        log(`<${r.name}> has killed ${target.name}. Their recruitment post gained three exclamation marks.`, "rival");
+      }
+    }
+  }
+  // world guilds progress too, quietly (no log spam — the world is big)
+  for (const r of st.worldGuilds) {
+    if (r.poachCooldown > 0) r.poachCooldown--;
+    if (r.kills < openBosses) {
+      const target = st.bosses[r.kills];
+      const chance = clamp((r.power - target.diff) * 0.10 + 0.05, 0.005, 0.30);
+      if (rnd() < chance) { r.kills++; r.lastKillDay = st.day; }
+    }
+  }
+
+  // daily flavor
+  if (rnd() < 0.6) log(pick(DAILY_FLAVOR), "flavor");
+
+  st.notifications = [...newNotifs, ...st.notifications].slice(0, 8);
+  return st;
+}
+
+/* server rank: guilds sorted by kills, ties by last kill day (earlier = better) */
+function serverRank(s) {
+  const myKills = s.bosses.filter((b) => b.killed).length;
+  const myLast = Math.max(0, ...s.bosses.filter((b) => b.killed).map((b) => b.killedDay));
+  const all = [
+    { name: "Crimson Oath", kills: myKills, last: myKills ? myLast : 9999, me: true },
+    ...s.rivals.map((r) => ({ name: r.name, kills: r.kills, last: r.kills ? r.lastKillDay : 9999, me: false, vibe: r.vibe, id: r.id })),
+  ];
+  all.sort((a, b) => b.kills - a.kills || a.last - b.last);
+  return all;
+}
+
+/* world rank: your server's rivals plus the much larger field of world guilds */
+function worldRank(s) {
+  const myKills = s.bosses.filter((b) => b.killed).length;
+  const myLast = Math.max(0, ...s.bosses.filter((b) => b.killed).map((b) => b.killedDay));
+  const all = [
+    { name: "Crimson Oath", kills: myKills, last: myKills ? myLast : 9999, me: true },
+    ...s.rivals.map((r) => ({ name: r.name, kills: r.kills, last: r.kills ? r.lastKillDay : 9999, me: false, vibe: r.vibe, id: r.id, scope: "server" })),
+    ...(s.worldGuilds || []).map((r) => ({ name: r.name, kills: r.kills, last: r.kills ? r.lastKillDay : 9999, me: false, id: r.id, scope: "world" })),
+  ];
+  all.sort((a, b) => b.kills - a.kills || a.last - b.last);
+  return all;
+}
+
+/* ============================================================
+   NOTIFICATION RESOLUTION
+   ============================================================ */
+function resolveNotif(st, notif, choiceId, log) {
+  const p = notif.targetId ? st.roster.find((x) => x.id === notif.targetId) : null;
+  const bump = (pl, d) => { if (pl) pl.morale = clamp(pl.morale + d, 0, 100); };
+  switch (notif.type) {
+    case "opening_prismara": {
+      const pr = st.roster.find((x) => x.name === "Prismara");
+      if (choiceId === "firm") { bump(pr, 5); st.culture += 8; log("You told Prismara there's a plan. There is now, legally, a plan."); }
+      if (choiceId === "listen") { bump(pr, 12); if (pr) pr.loyalty = clamp(pr.loyalty + 1, 1, 10); log("You asked Prismara for input. She sent nine paragraphs. Two were useful. She's... pleased?"); }
+      if (choiceId === "ignore") { bump(pr, -12); st.culture -= 3; log("You left Prismara on read. She has started a private channel. You are not in it."); }
+      break;
+    }
+    case "opening_daxon": {
+      const dx = st.roster.find((x) => x.name === "Daxon");
+      if (choiceId === "reach") { bump(dx, 14); if (dx) dx.loyalty = clamp(dx.loyalty + 2, 1, 10); log("You messaged Daxon. He replied 'k'. From Daxon, right now, 'k' is a hug."); }
+      if (choiceId === "space") { bump(dx, -6); log("You gave Daxon space. He filled the space with vague status messages."); }
+      break;
+    }
+    case "opening_culture": {
+      if (choiceId === "hardcore") { st.culture += 35; log("MOTD set: 'Progression first.' Three people changed their signatures to flask emojis."); }
+      if (choiceId === "balanced") { st.culture += 5; log("MOTD set: 'We kill bosses and we keep our friends.' Thessaly reacted with a heart. Twice."); }
+      if (choiceId === "chill") { st.culture -= 30; log("MOTD set: 'Vibes are forever.' Someone immediately asked if raids are optional. (They are not.)"); }
+      break;
+    }
+    case "opening_fennick": {
+      const f = st.roster.find((x) => x.name === "Fennick");
+      if (choiceId === "no") { bump(f, -4); st.culture += 6; if (f) f.reliability = clamp(f.reliability + 1, 1, 10); log("You held the line on invite times. Fennick said 'bet'. Unclear if compliance or threat."); }
+      if (choiceId === "yes") { bump(f, 8); st.culture -= 6; const th = st.roster.find((x) => x.name === "Thessaly"); bump(th, -5); log("Invites moved 15 minutes. The healers have formed a committee."); }
+      break;
+    }
+    case "toxic_incident": {
+      const v = notif.extraId ? st.roster.find((x) => x.id === notif.extraId) : null;
+      if (choiceId === "warn") { bump(p, -8); if (p) p.toxicity = clamp(p.toxicity - 1, 1, 10); bump(v, 6); st.culture += 4; log(`You warned ${p?.name} privately. They said 'it's called banter'. It is called a warning.`); }
+      if (choiceId === "kick") { st.roster = st.roster.filter((x) => x.id !== p?.id); bump(v, 12); st.culture += 8; st.roster.forEach((x) => { if (x.toxicity >= 6) bump(x, -6); }); log(`${p?.name} was removed from the guild. #general is quiet. The good quiet.`, "good"); }
+      if (choiceId === "ignore") { bump(v, -10); st.culture -= 8; if (v && v.loyalty) v.loyalty = clamp(v.loyalty - 2, 1, 10); log(`You let it slide. ${v ? v.name : "The healers"} noticed you let it slide.`); }
+      break;
+    }
+    case "loot_envy": {
+      if (choiceId === "promise") { bump(p, 10); st.lootDebt[p.id] = -2; log(`You promised ${p?.name} loot priority. This is now a verbal contract, notarised by the entire raid.`); }
+      if (choiceId === "explain") { if (p && p.coachability >= 6) { bump(p, 4); log(`${p?.name} accepted the loot philosophy. Grudgingly. The document remains 'on file'.`); } else { bump(p, -8); log(`${p?.name} did not accept the loot philosophy. The document has gained an appendix.`); } if (p) p.known.coachability = true; }
+      if (choiceId === "dismiss") { bump(p, -14); if (p) p.toxicity = clamp(p.toxicity + 1, 1, 10); log(`You said 'it's pixels'. ${p?.name} heard 'your feelings are pixels'. Bold move.`); }
+      break;
+    }
+    case "poach_attempt": {
+      const rv = st.rivals.find((r) => r.id === notif.rivalId);
+      if (choiceId === "counter") {
+        if (st.actions > 0) { st.actions--; bump(p, 12); if (p) p.loyalty = clamp(p.loyalty + 2, 1, 10); log(`You spent the evening making ${p?.name} feel valued. They stayed. (-1 action)`); }
+        else { bump(p, 3); log(`You meant to make ${p?.name} feel valued but ran out of day. They noticed the intent, at least.`); }
+      }
+      if (choiceId === "trust") {
+        if (p && (p.loyalty + p.morale / 20) >= 8) { bump(p, 8); log(`${p?.name} told <${rv?.name}> no, publicly, with a screenshot. Loyalty confirmed.`, "good"); }
+        else if (p) { st.roster = st.roster.filter((x) => x.id !== p.id); log(`${p.name} joined <${rv?.name}>. Their goodbye post thanked 'everyone except some people'.`, "bad"); }
+      }
+      if (choiceId === "confront") {
+        if (rv) rv.heat += 1; bump(p, 4);
+        log(`You told <${rv?.name}>'s GL to back off. They replied with a gif. War, basically.`);
+      }
+      break;
+    }
+    case "irl_event": {
+      if (choiceId === "support") { bump(p, 10); if (p) p.loyalty = clamp(p.loyalty + 1, 1, 10); st.culture -= 3; log(`You told ${p?.name} real life comes first. They screenshotted it 'for the culture'.`); }
+      if (choiceId === "pressure") { bump(p, -8); st.culture += 5; if (p && p.commitment <= 4 && rnd() < 0.3) { st.roster = st.roster.filter((x) => x.id !== p.id); log(`${p.name} chose the dog/job/flat over Tuesday. Fair, honestly.`, "bad"); } else log(`${p?.name} said they'll 'try' to make Tuesday. A word carrying heavy cargo.`); }
+      break;
+    }
+    case "thunderkeg": {
+      if (choiceId === "accept") {
+        const tk = mkPlayer({ name: "Thunderkeg", cls: "Warrior", spec: "Shieldwall", roleSkill: 8, mech: 7, reliability: 7, ego: 10, coachability: 2, toxicity: 6, loyalty: 5, commitment: 8, adaptability: 2, gear: 7, seed: 90210, morale: 60, joinedDay: st.day, trial: true, known: { coachability: true, toxicity: true, loyalty: true, commitment: true, mech: true }, trait: "Former GL. Rage-quit at wipe 23. 'We move.'" });
+        if (st.roster.length < ROSTER_CAP) { st.roster.push(tk); const pr = st.roster.find((x) => x.name === "Prismara"); bump(pr, -8); log("Thunderkeg has rejoined the guild. As a member. He has already suggested three strats.", "good"); }
+      } else {
+        log("You declined Thunderkeg's application. He replied 'respect'. Then applied to <Mandatory Fun>.");
+      }
+      break;
+    }
+    case "post_raid_grumble": {
+      if (choiceId === "address") { bump(p, 8); log(`You talked the raid down from the ledge after the rough night. ${p?.name} even said 'we go again'.`); }
+      if (choiceId === "ignore") { bump(p, -6); log("You let the post-wipe grumbling ferment. It is now artisanal grumbling."); }
+      break;
+    }
+    default: break;
+  }
+  st.notifications = st.notifications.filter((n) => n.id !== notif.id);
+}
+
+/* ============================================================
+   UI ATOMS
+   ============================================================ */
+const S = {
+  btn: {
+    fontFamily: "inherit", fontSize: 17, cursor: "pointer",
+    background: C.panel2, color: C.text, border: "2px solid " + C.border,
+    padding: "6px 12px", boxShadow: "2px 2px 0 #000000aa", imageRendering: "pixelated",
+  },
+  btnPrimary: { background: C.crimsonDark, borderColor: C.crimson, color: "#ffe8e0" },
+  btnGold: { background: "#5a4520", borderColor: C.gold, color: "#ffe8b0" },
+  panel: { background: C.panel, border: "2px solid " + C.border, boxShadow: "3px 3px 0 #00000088", padding: 12 },
+};
+
+function Btn({ children, onClick, primary, gold, disabled, style, title }) {
+  return (
+    <button title={title} disabled={disabled} onClick={onClick}
+      style={{ ...S.btn, ...(primary ? S.btnPrimary : {}), ...(gold ? S.btnGold : {}), opacity: disabled ? 0.45 : 1, cursor: disabled ? "default" : "pointer", ...style }}>
+      {children}
+    </button>
+  );
+}
+
+function Bar({ val, max = 100, color = C.green, h = 10, bg = "#0d0b18" }) {
+  return (
+    <div style={{ background: bg, border: "1px solid " + C.border, height: h, width: "100%", position: "relative" }}>
+      <div style={{ width: clamp((val / max) * 100, 0, 100) + "%", height: "100%", background: color, transition: "width .4s steps(8)" }} />
+    </div>
+  );
+}
+
+function StatPips({ label, val, known = true, color = C.gold }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15 }}>
+      <span style={{ width: 92, color: C.dim, overflow: "hidden", whiteSpace: "nowrap" }}>{label}</span>
+      {known ? (
+        <span style={{ letterSpacing: 1 }}>
+          {Array.from({ length: 10 }).map((_, i) => (
+            <span key={i} style={{ color: i < Math.round(val) ? color : "#3a3450" }}>■</span>
+          ))}
+          <span style={{ color: C.dim, marginLeft: 6 }}>{Math.round(val)}</span>
+        </span>
+      ) : (
+        <span style={{ color: C.faint }}>?????????? <span style={{ fontSize: 13 }}>(unknown)</span></span>
+      )}
+    </div>
+  );
+}
+
+function Tag({ children, color = C.dim }) {
+  return <span style={{ border: "1px solid " + color, color, padding: "1px 6px", fontSize: 13, marginRight: 6 }}>{children}</span>;
+}
+
+function moraleColor(m) { return m >= 65 ? C.green : m >= 40 ? C.gold : C.crimson; }
+function moraleWord(m) { return m >= 80 ? "thriving" : m >= 65 ? "good" : m >= 50 ? "fine-ish" : m >= 35 ? "grumbly" : m >= 20 ? "fraying" : "one bad pull from gone"; }
+
+/* ============================================================
+   VIEWS: DASHBOARD, ROSTER, RECRUIT, RIVALS, LOG
+   ============================================================ */
+function Dashboard({ st, setSt, pushLog }) {
+  const rank = serverRank(st);
+  const myRank = rank.findIndex((g) => g.me) + 1;
+  const wRank = worldRank(st);
+  const myWorldRank = wRank.findIndex((g) => g.me) + 1;
+  const nextBoss = st.bosses.find((b) => !b.killed);
+  const avgMorale = Math.round(st.roster.reduce((a, p) => a + p.morale, 0) / st.roster.length);
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      {!st.pinnedDismissed && (
+        <div style={{ ...S.panel, borderColor: C.gold, background: "#2a2410" }}>
+          <div style={{ color: C.gold, fontSize: 15 }}>📌 PINNED IN #GENERAL — 6 days ago</div>
+          <div style={{ fontSize: 20, margin: "6px 0", color: "#ffe8b0" }}>
+            "WIPE 23. TWENTY. THREE. I have led this guild for four years and I will not be spoken to about 'positioning' by a ROGUE. I'm done. Vault's yours. Good luck, you'll need it. — Thunderkeg"
+          </div>
+          <Btn onClick={() => setSt((s) => ({ ...s, pinnedDismissed: true }))}>Unpin it. New era.</Btn>
+        </div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12 }}>
+        <div style={S.panel}><div style={{ color: C.dim, fontSize: 14 }}>SERVER RANK</div><div style={{ fontSize: 30, color: myRank <= 3 ? C.gold : C.text }}>#{myRank}</div><div style={{ color: C.faint, fontSize: 13 }}>of {rank.length} guilds</div></div>
+        <div style={S.panel}><div style={{ color: C.dim, fontSize: 14 }}>WORLD RANK</div><div style={{ fontSize: 30, color: myWorldRank <= 3 ? C.gold : C.text }}>#{myWorldRank}</div><div style={{ color: C.faint, fontSize: 13 }}>of {wRank.length} guilds worldwide</div></div>
+        <div style={S.panel}><div style={{ color: C.dim, fontSize: 14 }}>GUILD MORALE</div><div style={{ fontSize: 30, color: moraleColor(avgMorale) }}>{avgMorale}</div><div style={{ color: C.faint, fontSize: 13 }}>{moraleWord(avgMorale)}</div></div>
+        <div style={S.panel}><div style={{ color: C.dim, fontSize: 14 }}>ROSTER</div><div style={{ fontSize: 30 }}>{st.roster.length}<span style={{ fontSize: 18, color: C.faint }}>/{ROSTER_CAP}</span></div><div style={{ color: C.faint, fontSize: 13 }}>{RAID_SIZE} needed to raid</div></div>
+        <div style={S.panel}><div style={{ color: C.dim, fontSize: 14 }}>CULTURE</div><div style={{ fontSize: 22, color: st.culture > 20 ? C.crimson : st.culture < -20 ? C.blue : C.text }}>{st.culture > 20 ? "HARDCORE" : st.culture < -20 ? "CHILL" : "BALANCED"}</div><div style={{ color: C.faint, fontSize: 13 }}>shapes who applies</div></div>
+      </div>
+      {nextBoss ? (
+        <div style={{ ...S.panel, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ color: C.dim, fontSize: 14 }}>NEXT TARGET — THE MOLTEN VAULT</div>
+            <div style={{ fontSize: 22, color: C.crimson }}>{nextBoss.name}</div>
+            <div style={{ color: C.dim, fontSize: 15 }}>{nextBoss.tag} · {nextBoss.attempts} career attempts · best pull {nextBoss.bestPull}%</div>
+          </div>
+        </div>
+      ) : (
+        <div style={{ ...S.panel, borderColor: C.gold }}><div style={{ fontSize: 22, color: C.gold }}>THE MOLTEN VAULT: CLEARED</div><div style={{ color: C.dim }}>The tier is done. The forum thread about your tier is not.</div></div>
+      )}
+      <div>
+        <div style={{ color: C.dim, fontSize: 15, marginBottom: 6 }}>INBOX — {st.notifications.length ? "these will not resolve themselves (they will, badly)" : "quiet. Enjoy it. It won't last."}</div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {st.notifications.map((n) => (
+            <div key={n.id} style={{ ...S.panel, borderColor: C.borderLit }}>
+              <div style={{ fontSize: 18, color: C.gold }}>{n.icon} {n.title}</div>
+              <div style={{ color: C.dim, margin: "6px 0 10px", fontSize: 16 }}>{n.text}</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {n.choices.map((c) => (
+                  <Btn key={c.id} onClick={() => setSt((s) => { const st2 = structuredClone(s); const nf = st2.notifications.find((x) => x.id === n.id); if (nf) resolveNotif(st2, nf, c.id, (t, k) => st2.log.unshift({ day: st2.day, kind: k || "event", text: t })); return st2; })}>{c.label}</Btn>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- talk modal ---------- */
+function TalkModal({ st, setSt, playerId, onClose }) {
+  const p = st.roster.find((x) => x.id === playerId);
+  const [result, setResult] = useState(null);
+  if (!p) return null;
+  const act = (fn) => {
+    setSt((s) => {
+      const st2 = structuredClone(s);
+      if (st2.actions <= 0) return st2;
+      st2.actions--;
+      const pl = st2.roster.find((x) => x.id === playerId);
+      const msg = fn(pl, st2);
+      st2.log.unshift({ day: st2.day, kind: "talk", text: msg });
+      setResult(msg);
+      return st2;
+    });
+  };
+  const noActions = st.actions <= 0;
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000000bb", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }} onClick={onClose}>
+      <div style={{ ...S.panel, width: 560, maxWidth: "100%", borderColor: C.borderLit }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", gap: 12 }}>
+          <Portrait seed={p.portraitSeed} clsColor={CLASSES[p.cls].color} size={64} />
+          <div>
+            <div style={{ fontSize: 22 }}>Whisper: {p.name}</div>
+            <div style={{ color: C.dim, fontSize: 15 }}>{p.spec} {p.cls} · morale {p.morale} ({moraleWord(p.morale)})</div>
+            <div style={{ color: C.faint, fontSize: 14, marginTop: 4 }}>Actions left today: {st.actions}</div>
+          </div>
+        </div>
+        {result ? (
+          <div style={{ margin: "12px 0", color: C.gold, fontSize: 17 }}>{result}</div>
+        ) : (
+          <div style={{ color: C.dim, margin: "12px 0", fontSize: 15 }}>Each conversation costs 1 action and reveals or shapes something.</div>
+        )}
+        <div style={{ display: "grid", gap: 8 }}>
+          <Btn disabled={noActions || !!result} onClick={() => act((pl) => {
+            if (pl.ego >= 7) { pl.morale = clamp(pl.morale + 12, 0, 100); return `You praised ${pl.name}. They agreed enthusiastically. Morale up; ego, somehow, also up. [morale +12]`; }
+            pl.morale = clamp(pl.morale + 8, 0, 100); return `You praised ${pl.name}. They said 'just doing my job' and then screenshot it. [morale +8]`;
+          })}>💬 Praise their play (+morale)</Btn>
+          <Btn disabled={noActions || !!result} onClick={() => act((pl) => {
+            pl.known.coachability = true;
+            if (pl.coachability >= 6) { pl.roleSkill = clamp(pl.roleSkill + 0.4, 1, 10); pl.morale = clamp(pl.morale + 3, 0, 100); return `You gave ${pl.name} feedback. They took notes. Actual notes. Role skill improving. [role skill +0.4, morale +3, coachability revealed: ${pl.coachability}]`; }
+            pl.morale = clamp(pl.morale - 6, 0, 100); return `You gave ${pl.name} feedback. They explained why the logs are wrong. The logs are not wrong. [morale -6, coachability revealed: ${pl.coachability}]`;
+          })}>📋 Give feedback (reveals Coachability, may train skill)</Btn>
+          <Btn disabled={noActions || !!result} onClick={() => act((pl) => {
+            pl.known.commitment = true; pl.known.loyalty = true; pl.morale = clamp(pl.morale + 4, 0, 100);
+            return `You checked in on ${pl.name}'s life. You now know their commitment (${pl.commitment}) and loyalty (${pl.loyalty}). Also their dog's name. It's Biscuit. [morale +4, commitment & loyalty revealed]`;
+          })}>☕ Check in as a person (reveals Commitment & Loyalty)</Btn>
+          <Btn disabled={noActions || !!result} onClick={() => act((pl) => {
+            pl.known.toxicity = true;
+            if (pl.toxicity >= 6) { pl.morale = clamp(pl.morale - 8, 0, 100); return `You raised the attitude issue with ${pl.name}. They said 'people are soft'. Toxicity: confirmed (${pl.toxicity}). [morale -8, toxicity revealed: ${pl.toxicity}]`; }
+            pl.morale = clamp(pl.morale - 2, 0, 100); return `You raised the attitude question. ${pl.name} was genuinely confused. Sweet, even. Toxicity: low (${pl.toxicity}). [morale -2, toxicity revealed: ${pl.toxicity}]`;
+          })}>🔥 Address attitude (reveals Toxicity, risky)</Btn>
+        </div>
+        <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
+          <Btn onClick={onClose}>{result ? "Done" : "Close"}</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RosterView({ st, setSt }) {
+  const [open, setOpen] = useState(null);
+  const [talk, setTalk] = useState(null);
+  const [confirmKick, setConfirmKick] = useState(null);
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ color: C.dim, fontSize: 15 }}>Click a row to expand. Hidden stats reveal through raids, conversations and time. People contain surprises. Some are bad.</div>
+      {st.roster.map((p) => {
+        const isOpen = open === p.id;
+        return (
+          <div key={p.id} style={{ ...S.panel, padding: 8, borderColor: isOpen ? C.borderLit : C.border }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", flexWrap: "wrap" }} onClick={() => setOpen(isOpen ? null : p.id)}>
+              <Portrait seed={p.portraitSeed} clsColor={CLASSES[p.cls].color} size={40} />
+              <div style={{ minWidth: 140 }}>
+                <span style={{ fontSize: 19, color: p.isPlayer ? C.gold : C.text }}>{p.name}</span>
+                {p.trial && <Tag color={C.blue}>TRIAL</Tag>}
+                {p.origin === "transfer" && <Tag color={C.purple}>🌐 TRANSFER</Tag>}
+              </div>
+              <div style={{ color: CLASSES[p.cls].color, fontSize: 15, minWidth: 170 }}>{ROLE_ICON[p.role]} {p.spec} {p.cls}</div>
+              <div style={{ flex: 1, minWidth: 120 }}>
+                <div style={{ fontSize: 12, color: C.faint }}>MORALE {p.morale}</div>
+                <Bar val={p.morale} color={moraleColor(p.morale)} h={8} />
+              </div>
+              <div style={{ fontSize: 15, color: C.dim }}>SKILL {Math.round(p.roleSkill)} · GEAR {p.gear}</div>
+              <span style={{ color: C.faint }}>{isOpen ? "▲" : "▼"}</span>
+            </div>
+            {isOpen && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid " + C.border }}>
+                <div style={{ color: C.gold, fontSize: 15, marginBottom: 8 }}>"{p.trait}"</div>
+                {!p.isPlayer && p.unavailableDays && p.unavailableDays.length > 0 && (
+                  <div style={{ color: C.faint, fontSize: 14, marginBottom: 8 }}>Can't raid: {p.unavailableDays.map((d) => WEEKDAYS[d]).join(", ")}</div>
+                )}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(230px,1fr))", gap: 4 }}>
+                  <StatPips label="Role skill" val={p.roleSkill} />
+                  <StatPips label="Mechanics" val={p.mech} known={p.known.mech} />
+                  <StatPips label="Reliability" val={p.reliability} color={C.blue} />
+                  <StatPips label="Ego" val={p.ego} color={C.crimson} />
+                  <StatPips label="Coachable" val={p.coachability} known={p.known.coachability} color={C.green} />
+                  <StatPips label="Toxicity" val={p.toxicity} known={p.known.toxicity} color={C.crimson} />
+                  <StatPips label="Loyalty" val={p.loyalty} known={p.known.loyalty} color={C.blue} />
+                  <StatPips label="Commitment" val={p.commitment} known={p.known.commitment} color={C.gold} />
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                  {!p.isPlayer && <Btn onClick={() => setTalk(p.id)} disabled={st.actions <= 0} title={st.actions <= 0 ? "No actions left today" : ""}>💬 Whisper ({st.actions} actions left)</Btn>}
+                  {!p.isPlayer && (confirmKick === p.id ? (
+                    <Btn primary onClick={() => { setSt((s) => { const st2 = structuredClone(s); st2.roster = st2.roster.filter((x) => x.id !== p.id); st2.log.unshift({ day: st2.day, kind: "bad", text: `${p.name} was removed from the guild. The recruitment post has been dusted off.` }); return st2; }); setConfirmKick(null); setOpen(null); }}>Confirm gkick. Really.</Btn>
+                  ) : (
+                    <Btn onClick={() => setConfirmKick(p.id)}>⚠ Remove from guild</Btn>
+                  ))}
+                  {p.isPlayer && <span style={{ color: C.dim, fontSize: 15, alignSelf: "center" }}>This is you. Please drink water.</span>}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {talk && <TalkModal st={st} setSt={setSt} playerId={talk} onClose={() => setTalk(null)} />}
+    </div>
+  );
+}
+
+function RecruitView({ st, setSt }) {
+  const full = st.roster.length >= ROSTER_CAP;
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <div style={S.panel}>
+        <div style={{ fontSize: 18, color: C.gold }}>APPLICATION BOARD</div>
+        <div style={{ color: C.dim, fontSize: 15 }}>
+          Your culture ({st.culture > 20 ? "hardcore" : st.culture < -20 ? "chill" : "balanced"}) shapes who applies. Stats marked ? are unknown until you interact — or gamble. "Ask around" costs 1 action.
+        </div>
+      </div>
+      {st.applicants.length === 0 && <div style={{ ...S.panel, color: C.dim }}>No applications. The recruitment post has 340 views and zero replies. Classic.</div>}
+      {st.applicants.map((a) => {
+        const p = a.player;
+        return (
+          <div key={a.id} style={{ ...S.panel, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <Portrait seed={p.portraitSeed} clsColor={CLASSES[p.cls].color} size={56} />
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <div style={{ fontSize: 19 }}>{p.name} <span style={{ color: CLASSES[p.cls].color, fontSize: 15 }}>{ROLE_ICON[p.role]} {p.spec} {p.cls}</span>{p.origin === "transfer" && <Tag color={C.blue}>🌐 SERVER TRANSFER</Tag>}</div>
+              <div style={{ color: C.gold, fontSize: 14 }}>"{a.note}"</div>
+              <div style={{ fontSize: 14, color: C.dim, marginTop: 4 }}>
+                Role skill: {a.linkedLogs ? Math.round(p.roleSkill) + "/10 (linked logs)" : p.origin === "transfer" ? Math.round(p.roleSkill) + "/10 (their old server's logs)" : "? (no logs — 'trust me')"} ·
+                Gear: {p.origin === "transfer" ? p.gear + "/10 (will need to farm up)" : "?"} ·
+                Reliability: ? · Ego: ? ·
+                {a.askedAround ? ` Loyalty: ${p.loyalty} · Commitment: ${p.commitment} (grapevine)` : " Loyalty: ? · Commitment: ?"}
+              </div>
+              <div style={{ fontSize: 13, color: C.faint }}>Expires day {a.expires} · can't raid: {p.unavailableDays.map((d) => WEEKDAYS[d]).join(", ") || "—"}</div>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {!a.askedAround && <Btn disabled={st.actions <= 0} onClick={() => setSt((s) => { const st2 = structuredClone(s); if (st2.actions <= 0) return st2; st2.actions--; const ap = st2.applicants.find((x) => x.id === a.id); if (ap) { ap.askedAround = true; } st2.log.unshift({ day: st2.day, kind: "talk", text: `You asked around about ${p.name}. Three contacts, two opinions, one story involving a fishing tournament.` }); return st2; })}>🕵 Ask around (1 action)</Btn>}
+              <Btn gold disabled={full} title={full ? "Roster full" : ""} onClick={() => setSt((s) => {
+                const st2 = structuredClone(s);
+                if (st2.roster.length >= ROSTER_CAP) return st2;
+                const ap = st2.applicants.find((x) => x.id === a.id); if (!ap) return st2;
+                const np = structuredClone(ap.player); np.joinedDay = st2.day; np.trial = true;
+                if (ap.askedAround) { np.known.loyalty = true; np.known.commitment = true; }
+                if (ap.linkedLogs) np.known.mech = true;
+                st2.roster.push(np);
+                st2.applicants = st2.applicants.filter((x) => x.id !== a.id);
+                st2.log.unshift({ day: st2.day, kind: "good", text: `${np.name} joined Crimson Oath on trial. #general says 'welcome' 11 times in 4 seconds.` });
+                return st2;
+              })}>✓ Invite (trial)</Btn>
+              <Btn onClick={() => setSt((s) => { const st2 = structuredClone(s); st2.applicants = st2.applicants.filter((x) => x.id !== a.id); st2.log.unshift({ day: st2.day, kind: "event", text: `You declined ${p.name}'s application, kindly. They replied 'your loss' , less kindly.` }); return st2; })}>✕ Decline</Btn>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RivalsView({ st, setSt }) {
+  const rank = serverRank(st);
+  const myKills = st.bosses.filter((b) => b.killed).length;
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <div style={{ color: C.dim, fontSize: 15 }}>Server progression race — The Molten Vault ({st.bosses.length} bosses). You can attempt to poach a rival's star player (1 action, consequences included free of charge).</div>
+      {rank.map((g, i) => {
+        const rv = g.me ? null : st.rivals.find((r) => r.id === g.id);
+        return (
+          <div key={g.name} style={{ ...S.panel, padding: 10, borderColor: g.me ? C.gold : C.border, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 24, width: 52, color: i === 0 ? C.gold : i < 3 ? C.text : C.faint }}>#{i + 1}</div>
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <div style={{ fontSize: 19, color: g.me ? C.gold : C.text }}>&lt;{g.name}&gt; {g.me && "(you)"}</div>
+              <div style={{ color: C.dim, fontSize: 14 }}>{g.me ? "Under new management. The management is tired." : rv.vibe}</div>
+            </div>
+            <div style={{ minWidth: 160 }}>
+              <div style={{ fontSize: 13, color: C.faint }}>{g.kills}/{st.bosses.length} bosses</div>
+              <Bar val={g.kills} max={st.bosses.length} color={g.me ? C.gold : C.crimson} />
+            </div>
+            {!g.me && (
+              <Btn disabled={st.actions <= 0 || rv.poachCooldown > 0 || st.roster.length >= ROSTER_CAP}
+                title={rv.poachCooldown > 0 ? `They're on alert (${rv.poachCooldown}d)` : st.roster.length >= ROSTER_CAP ? "Roster full" : ""}
+                onClick={() => setSt((s) => {
+                  const st2 = structuredClone(s);
+                  if (st2.actions <= 0) return st2;
+                  st2.actions--;
+                  const r2 = st2.rivals.find((x) => x.id === rv.id);
+                  r2.poachCooldown = 5;
+                  const used = new Set(st2.usedNames);
+                  const cls = pick(Object.keys(CLASSES)); const spec = pick(Object.keys(CLASSES[cls].specs));
+                  const starSkill = clamp(Math.round(r2.power + ri(-1, 1)), 4, 10);
+                  const myRankNow = serverRank(st2).findIndex((x) => x.me);
+                  const theirRank = serverRank(st2).findIndex((x) => x.name === r2.name);
+                  let chance = 0.35 + (theirRank - myRankNow) * 0.06 - r2.heat * 0.05;
+                  chance = clamp(chance, 0.08, 0.8);
+                  if (rnd() < chance) {
+                    const np = mkPlayer({ name: genName(used), cls, spec, roleSkill: starSkill, reliability: ri(5, 9), ego: ri(5, 10), gear: clamp(Math.round(r2.power - 1), 3, 9), joinedDay: st2.day, trial: true, trait: `Poached from <${r2.name}>. Watch your back and your loot rules.` });
+                    st2.roster.push(np); r2.heat += 2;
+                    st2.usedNames = Array.from(used);
+                    st2.log.unshift({ day: st2.day, kind: "good", text: `POACHED: ${np.name} (${np.spec} ${np.cls}, skill ${np.roleSkill}) left <${r2.name}> for you. Their GL posted a very calm 800-word statement.` });
+                  } else {
+                    r2.heat += 1;
+                    st2.log.unshift({ day: st2.day, kind: "bad", text: `Your poach attempt on <${r2.name}> failed. Screenshots of your whisper are now their recruitment ad.` });
+                  }
+                  return st2;
+                })}>🎣 Poach ({st.actions} act.)</Btn>
+            )}
+          </div>
+        );
+      })}
+      <div style={{ color: C.faint, fontSize: 13 }}>Race status: you've cleared {myKills}/{st.bosses.length}. {rank[0].me ? "You lead the server. Try not to mention it in trade chat. (Mention it a little.)" : `<${rank[0].name}> leads.`}</div>
+
+      <div style={{ marginTop: 10, color: C.gold, fontSize: 18 }}>🌐 THE WIDER WORLD</div>
+      <div style={{ color: C.dim, fontSize: 15 }}>
+        Your server is one of many. These guilds aren't racing you directly, but they're why "server first" isn't "world first." Poaching a world-server player is harder, and they'll arrive undergeared — plan to farm them up.
+      </div>
+      {st.worldGuilds.slice().sort((a, b) => b.kills - a.kills || a.lastKillDay - b.lastKillDay).map((wg) => (
+        <div key={wg.id} style={{ ...S.panel, padding: 10, borderColor: C.border, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontSize: 18 }}>&lt;{wg.name}&gt;</div>
+          </div>
+          <div style={{ minWidth: 160 }}>
+            <div style={{ fontSize: 13, color: C.faint }}>{wg.kills}/{st.bosses.length} bosses</div>
+            <Bar val={wg.kills} max={st.bosses.length} color={C.purple} />
+          </div>
+          <Btn disabled={st.actions <= 0 || wg.poachCooldown > 0 || st.roster.length >= ROSTER_CAP}
+            title={wg.poachCooldown > 0 ? `They're on alert (${wg.poachCooldown}d)` : st.roster.length >= ROSTER_CAP ? "Roster full" : ""}
+            onClick={() => setSt((s) => {
+              const st2 = structuredClone(s);
+              if (st2.actions <= 0) return st2;
+              st2.actions--;
+              const w2 = st2.worldGuilds.find((x) => x.id === wg.id);
+              w2.poachCooldown = 6;
+              const used = new Set(st2.usedNames);
+              const cls = pick(Object.keys(CLASSES)); const spec = pick(Object.keys(CLASSES[cls].specs));
+              const starSkill = clamp(Math.round(w2.power + ri(-1, 1)), 4, 10);
+              const chance = clamp(0.22 - w2.heat * 0.04, 0.05, 0.45);
+              if (rnd() < chance) {
+                const np = mkPlayer({ name: genName(used), cls, spec, roleSkill: starSkill, reliability: ri(5, 9), ego: ri(5, 10), gear: ri(1, 3), origin: "transfer", joinedDay: st2.day, trial: true, trait: `Transferred from <${w2.name}>, another server entirely. Skilled. Needs gear.` });
+                st2.roster.push(np); w2.heat += 2;
+                st2.usedNames = Array.from(used);
+                st2.log.unshift({ day: st2.day, kind: "good", text: `TRANSFER SECURED: ${np.name} (${np.spec} ${np.cls}, skill ${np.roleSkill}) is moving servers to join you. They'll need gear before they carry weight in raid.` });
+              } else {
+                w2.heat += 1;
+                st2.log.unshift({ day: st2.day, kind: "bad", text: `Your cross-server recruitment pitch to <${w2.name}>'s star went nowhere. Different server, different drama, apparently.` });
+              }
+              return st2;
+            })}>🎣 Recruit ({st.actions} act.)</Btn>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LogView({ st }) {
+  const kindColor = { good: C.green, bad: C.crimson, rival: C.purple, story: C.gold, talk: C.blue, flavor: C.faint, event: C.dim, raid: C.gold };
+  return (
+    <div style={{ display: "grid", gap: 4 }}>
+      {st.log.slice(0, 120).map((l, i) => (
+        <div key={i} style={{ fontSize: 16, padding: "4px 8px", background: i % 2 ? "transparent" : "#ffffff06" }}>
+          <span style={{ color: C.faint, marginRight: 8 }}>D{l.day}</span>
+          <span style={{ color: kindColor[l.kind] || C.text }}>{l.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ============================================================
+   RAID PLANNER
+   ============================================================ */
+function RaidPlanner({ st, setSt, onStart }) {
+  const [sel, setSel] = useState(() => st.roster.slice(0, RAID_SIZE).map((p) => p.id));
+  const [mSpec, setMSpec] = useState("Holy");
+  const pickableBoss = (b) => !b.killedThisWeek;
+  const [bossId, setBossId] = useState(() => (st.bosses.find((b) => !b.killed && pickableBoss(b)) || st.bosses.find(pickableBoss) || st.bosses[0]).id);
+  // roll availability once per day
+  useEffect(() => {
+    if (st.availabilityDay !== st.day) {
+      setSt((s) => ({ ...s, availabilityDay: s.day, availability: rollAvailability(s.roster, s.day, s.schedule) }));
+    }
+  }, [st.day]);
+  const avail = st.availability || {};
+  const weekday = weekdayOf(st.day);
+  const kind = scheduleKind(st.schedule, weekday);
+  const boss = st.bosses.find((b) => b.id === bossId);
+  const lineup = st.roster.filter((p) => sel.includes(p.id) && avail[p.id] !== "out");
+  const tp = teamPower(lineup, mSpec);
+  const effDiff = boss.killed ? boss.diff - 1.5 : boss.diff;
+  const forecast = tp.power + boss.learning * 0.12 - effDiff;
+  const forecastText =
+    forecast > 1.2 ? "Forecast: they should die. Famous last words." :
+    forecast > 0.2 ? "Forecast: winnable. Bring your good keyboard." :
+    forecast > -0.8 ? "Forecast: coin flip. The coin is greased." :
+    "Forecast: this is a team-building exercise. The team being built is the boss's.";
+  const effIn = (arr) => arr.filter((id) => (avail[id] || "in") !== "out").length;
+  const toggle = (id) => setSel((s) => {
+    if (s.includes(id)) return s.filter((x) => x !== id);
+    if (effIn(s) >= RAID_SIZE) return s;
+    return [...s, id];
+  });
+  const anyLocked = st.bosses.some((b) => b.killedThisWeek);
+  const pullBudget = computePullBudget(lineup);
+  const cycleDay = (d, list) => setSt((s) => {
+    const st2 = structuredClone(s);
+    const inMain = st2.schedule.main.includes(d), inOpt = st2.schedule.optional.includes(d);
+    st2.schedule.main = st2.schedule.main.filter((x) => x !== d);
+    st2.schedule.optional = st2.schedule.optional.filter((x) => x !== d);
+    if (!inMain && !inOpt) st2.schedule.optional.push(d);
+    else if (inOpt) st2.schedule.main.push(d);
+    // else was main -> now neither (off)
+    return st2;
+  });
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <div style={S.panel}>
+        <div style={{ color: C.dim, fontSize: 14, marginBottom: 6 }}>WEEKLY SCHEDULE — click a day to cycle off → optional → main. Main days pull the best turnout; unscheduled days are a ghost town.</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {WEEKDAYS.map((wd, d) => {
+            const isMain = st.schedule.main.includes(d), isOpt = st.schedule.optional.includes(d);
+            return (
+              <Btn key={d} primary={isMain} onClick={() => cycleDay(d)}
+                style={{ fontSize: 14, borderColor: isOpt ? C.gold : undefined, color: isOpt && !isMain ? C.gold : undefined }}>
+                {wd}{d === weekday ? " •" : ""}{isMain ? " ★" : isOpt ? " ○" : ""}
+              </Btn>
+            );
+          })}
+        </div>
+        <div style={{ color: C.faint, fontSize: 13, marginTop: 6 }}>
+          Today ({WEEKDAYS[weekday]}) is {kind === "main" ? "a MAIN raid day — good turnout expected." : kind === "optional" ? "an OPTIONAL day — turnout depends on who's committed." : "not scheduled — most of the roster has other plans."}
+        </div>
+      </div>
+      <div style={S.panel}>
+        <div style={{ color: C.dim, fontSize: 14, marginBottom: 8 }}>WHO CAN RAID WHEN — ✓ available · ✗ personal blackout day · ★ main / ○ optional raid day</div>
+        <div style={{ overflowX: "auto" }}>
+          <div style={{ display: "grid", gridTemplateColumns: `130px repeat(7, minmax(38px, 1fr))`, gap: 2, fontSize: 14, minWidth: 460 }}>
+            <div />
+            {WEEKDAYS.map((wd, d) => (
+              <div key={d} style={{ textAlign: "center", color: st.schedule.main.includes(d) ? C.gold : st.schedule.optional.includes(d) ? C.blue : C.faint, fontSize: 13 }}>
+                {wd}{st.schedule.main.includes(d) ? " ★" : st.schedule.optional.includes(d) ? " ○" : ""}
+              </div>
+            ))}
+            {st.roster.filter((p) => !p.isPlayer).map((p) => (
+              <React.Fragment key={p.id}>
+                <div style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                {WEEKDAYS.map((wd, d) => {
+                  const blocked = p.unavailableDays.includes(d);
+                  return <div key={d} style={{ textAlign: "center", color: blocked ? C.crimson : C.green, background: d === weekday ? "#ffffff0c" : "transparent" }}>{blocked ? "✗" : "✓"}</div>;
+                })}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div style={S.panel}>
+        <div style={{ color: C.dim, fontSize: 14 }}>TARGET (you can switch bosses mid-raid-night too, once trash is cleared for the new target)</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "8px 0" }}>
+          {st.bosses.map((b, i) => {
+            const progLocked = !b.killed && st.bosses.slice(0, i).some((x) => !x.killed);
+            const weekLocked = b.killedThisWeek;
+            const locked = progLocked || weekLocked;
+            return (
+              <Btn key={b.id} disabled={locked} primary={bossId === b.id}
+                title={weekLocked ? "Already looted this week — resets next week, or use a manual reset" : ""}
+                onClick={() => setBossId(b.id)}>
+                {b.killed ? "✓ " : progLocked ? "🔒 " : ""}{b.name}{weekLocked ? " (locked this wk)" : b.killed ? " (farm)" : ""}
+              </Btn>
+            );
+          })}
+        </div>
+        <div style={{ color: C.crimson, fontSize: 18 }}>{boss.name} <span style={{ color: C.dim, fontSize: 14 }}>difficulty {effDiff.toFixed(1)}{boss.killed ? " (on farm)" : ""} · {boss.tanksNeeded} tank{boss.tanksNeeded > 1 ? "s" : ""} required · learning +{fmt1(boss.learning * 0.12)}</span></div>
+        <div style={{ color: C.dim, fontSize: 15, marginTop: 4 }}>{boss.blurb}</div>
+        {anyLocked && (
+          <div style={{ marginTop: 8 }}>
+            <Btn disabled={st.actions <= 0} title={st.actions <= 0 ? "No actions left today" : ""} onClick={() => setSt((s) => {
+              const st2 = structuredClone(s);
+              if (st2.actions <= 0) return st2;
+              st2.actions--;
+              for (const b of st2.bosses) b.killedThisWeek = false;
+              for (const p of st2.roster) if (!p.isPlayer) p.morale = clamp(p.morale - 3, 0, 100);
+              st2.log.unshift({ day: st2.day, kind: "event", text: "You called an early lockout reset. Extra grinding, groans all around. [all bosses unlocked, roster morale -3]" });
+              return st2;
+            })}>🔓 Reset weekly lockout early (1 action, roster morale -3)</Btn>
+          </div>
+        )}
+      </div>
+      <div style={S.panel}>
+        <div style={{ color: C.dim, fontSize: 14, marginBottom: 6 }}>YOUR SPEC TONIGHT (adaptability 9 has its uses)</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn primary={mSpec === "Holy"} onClick={() => setMSpec("Holy")}>✚ Holy (Healer)</Btn>
+          <Btn primary={mSpec === "Shieldbearer"} onClick={() => setMSpec("Shieldbearer")}>🛡 Shieldbearer (Tank)</Btn>
+        </div>
+      </div>
+      <div style={S.panel}>
+        <div style={{ color: C.dim, fontSize: 14, marginBottom: 6 }}>LINEUP — {lineup.length}/{RAID_SIZE} · 🛡{tp.tanks} ✚{tp.healers} ⚔{tp.dps} · avg morale {Math.round(tp.avgMorale || 0)} · ~{pullBudget} pulls expected tonight (commitment-based)</div>
+        <div style={{ display: "grid", gap: 4 }}>
+          {st.roster.map((p) => {
+            const a = avail[p.id] || "in";
+            const inSel = sel.includes(p.id);
+            const role = p.isPlayer ? CLASSES.Cleric.specs[mSpec] : p.role;
+            return (
+              <div key={p.id} onClick={() => !p.isPlayer && toggle(p.id)}
+                style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 6px", cursor: p.isPlayer ? "default" : "pointer", background: inSel && a !== "out" ? "#2a2445" : "transparent", opacity: a === "out" ? 0.45 : 1, border: "1px solid " + (inSel && a !== "out" ? C.borderLit : "transparent") }}>
+                <span style={{ width: 20, color: C.gold }}>{p.isPlayer ? "★" : inSel && a !== "out" ? "☑" : "☐"}</span>
+                <Portrait seed={p.portraitSeed} clsColor={CLASSES[p.cls].color} size={28} />
+                <span style={{ minWidth: 120 }}>{p.name}</span>
+                <span style={{ color: ROLE_COLOR[role], fontSize: 14, minWidth: 60 }}>{ROLE_ICON[role]} {role}</span>
+                <span style={{ color: C.dim, fontSize: 14 }}>skill {Math.round(p.roleSkill)} · gear {p.gear} · morale {p.morale} · commit {p.known?.commitment ? p.commitment : "?"}</span>
+                {a === "late" && <Tag color={C.gold}>LATE — misses first 2 pulls</Tag>}
+                {a === "out" && <Tag color={C.crimson}>OUT: {OUT_EXCUSES[(p.portraitSeed + st.day) % OUT_EXCUSES.length]}</Tag>}
+              </div>
+            );
+          })}
+        </div>
+        {tp.warnings.map((w, i) => <div key={i} style={{ color: C.gold, fontSize: 14, marginTop: 6 }}>⚠ {w}</div>)}
+        {tp.tanks < boss.tanksNeeded && <div style={{ color: C.crimson, fontSize: 14, marginTop: 4 }}>⚠ {boss.name} wants {boss.tanksNeeded} tanks. You have {tp.tanks}. This is a penalty, not a veto. Mostly a penalty.</div>}
+        <div style={{ marginTop: 10, color: forecast > 0 ? C.green : C.crimson, fontSize: 16 }}>{forecastText}</div>
+        <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <Btn gold disabled={st.raidedToday || lineup.length < 5 || boss.killedThisWeek}
+            title={st.raidedToday ? "Already raided today" : lineup.length < 5 ? "Need at least 5 raiders" : boss.killedThisWeek ? "This boss is locked for the week" : ""}
+            onClick={() => onStart({ lineupIds: lineup.map((p) => p.id), mSpec, bossId })}>
+            ⚔ FORM RAID — trash pull first, then the boss
+          </Btn>
+          {st.raidedToday && <span style={{ color: C.dim, fontSize: 14 }}>You already raided today. The healers have gone to bed. Wisely.</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   RAID NIGHT — rendered
+   ============================================================ */
+function RaidNight({ st, setSt, cfg, onExit }) {
+  const { lineupIds, mSpec, bossId } = cfg;
+  const lineup = st.roster.filter((p) => lineupIds.includes(p.id));
+  const late = st.availability || {};
+  const [targetBossId, setTargetBossId] = useState(bossId);
+  const boss = st.bosses.find((b) => b.id === targetBossId);
+  const [bossHP, setBossHP] = useState({ [bossId]: 100 });
+  const nightHP = bossHP[targetBossId] ?? 100;
+  const [trashCleared, setTrashCleared] = useState(new Set());
+  const [pullBudget] = useState(() => computePullBudget(lineup));
+  const [pullsUsed, setPullsUsed] = useState(0);
+  const [attempts, setAttempts] = useState([]); // unified feed: {kind:'trash'|'boss', ...}
+  const [phase, setPhase] = useState("ready"); // ready | trash | pulling | loot
+  const [pendingLoot, setPendingLoot] = useState(null);
+  const canvasRef = useRef(null);
+  const leftRef = useRef(new Set());
+  const animRef = useRef({ frame: 0, projectiles: [], floats: [], hurt: 0, wipeAt: -1, dead: new Set(), shake: 0, hpShown: 100, hpTarget: 100, running: false, killFall: 0 });
+
+  const W = 680, H = 300;
+  const positions = useMemo(() => {
+    const tanks = [], heals = [], dps = [];
+    for (const p of lineup) {
+      const role = p.isPlayer ? CLASSES.Cleric.specs[mSpec] : p.role;
+      (role === "Tank" ? tanks : role === "Healer" ? heals : dps).push(p);
+    }
+    const pos = {};
+    tanks.forEach((p, i) => (pos[p.id] = { x: 330, y: 120 + i * 46 }));
+    dps.forEach((p, i) => (pos[p.id] = { x: 180 + (i % 2) * 55, y: 70 + Math.floor(i / 2) * 46 }));
+    heals.forEach((p, i) => (pos[p.id] = { x: 70, y: 100 + i * 50 }));
+    return pos;
+  }, [lineupIds.join(","), mSpec]);
+
+  const activeLineup = () => lineup.filter((p) => {
+    if (leftRef.current.has(p.id)) return false;
+    if (late[p.id] === "late" && pullsUsed < 2) return false;
+    return true;
+  });
+
+  // reset per-boss visuals when switching target
+  useEffect(() => {
+    if (bossHP[targetBossId] === undefined) setBossHP((h) => ({ ...h, [targetBossId]: 100 }));
+    animRef.current.hpShown = bossHP[targetBossId] ?? 100;
+    animRef.current.hpTarget = bossHP[targetBossId] ?? 100;
+    animRef.current.killFall = 0;
+  }, [targetBossId]);
+
+  // draw loop
+  useEffect(() => {
+    let raf;
+    const draw = () => {
+      const cv = canvasRef.current;
+      if (cv) {
+        const ctx = cv.getContext("2d");
+        const A = animRef.current;
+        A.frame++;
+        const shx = A.shake > 0 ? (rnd() * 6 - 3) : 0;
+        const shy = A.shake > 0 ? (rnd() * 6 - 3) : 0;
+        if (A.shake > 0) A.shake--;
+        ctx.save();
+        ctx.translate(shx, shy);
+        // background: the Molten Vault
+        ctx.fillStyle = "#0d0a18"; ctx.fillRect(-8, -8, W + 16, H + 16);
+        ctx.fillStyle = "#1a1226";
+        for (let i = 0; i < 14; i++) ctx.fillRect(i * 52, 0, 26, H);
+        ctx.fillStyle = "#241830"; ctx.fillRect(0, H - 46, W, 46);
+        ctx.fillStyle = "#2e1f3d"; for (let i = 0; i < 20; i++) ctx.fillRect(i * 36, H - 46, 18, 4);
+        // lava glow
+        ctx.fillStyle = "#4a1a10"; ctx.fillRect(0, H - 10, W, 10);
+        for (let i = 0; i < 10; i++) { ctx.fillStyle = (A.frame + i * 7) % 40 < 20 ? "#e05a20" : "#a03510"; ctx.fillRect(((i * 73) + A.frame) % W, H - 8, 10, 4); }
+        // torches
+        for (const tx of [40, 620]) { ctx.fillStyle = "#5a4a30"; ctx.fillRect(tx, 40, 6, 22); ctx.fillStyle = A.frame % 10 < 5 ? "#ffb84c" : "#e07030"; ctx.fillRect(tx - 2, 30, 10, 12); }
+        // boss (or a dim trash silhouette while clearing trash)
+        const bx = 480, by = 40 + A.killFall * 2;
+        if (A.killFall < 60) {
+          ctx.save();
+          if (A.killFall > 0) ctx.globalAlpha = clamp(1 - A.killFall / 55, 0, 1);
+          if (phase === "trash") ctx.globalAlpha = 0.55;
+          ctx.translate(bx, by);
+          drawBoss(ctx, boss, 8, Math.floor(A.frame / 12), A.hurt > 0);
+          ctx.restore();
+        }
+        if (A.hurt > 0) A.hurt--;
+        // raiders
+        for (const p of lineup) {
+          const pos = positions[p.id];
+          const isDead = A.dead.has(p.id);
+          const isAbsent = leftRef.current.has(p.id) || (late[p.id] === "late" && pullsUsed < 2);
+          if (isAbsent) continue;
+          if (isDead) {
+            ctx.fillStyle = "#8a8598"; ctx.fillRect(pos.x, pos.y + 12, 15, 12);
+            ctx.fillStyle = "#c8c3d8"; ctx.fillRect(pos.x + 3, pos.y + 8, 9, 6);
+            ctx.fillStyle = "#3a3450"; ctx.fillRect(pos.x + 5, pos.y + 14, 5, 2);
+          } else {
+            drawRaider(ctx, pos.x, pos.y, { ...p, role: p.isPlayer ? CLASSES.Cleric.specs[mSpec] : p.role }, Math.floor(A.frame / 10), A.projectiles.some((pr) => pr.srcId === p.id && pr.t < 4));
+          }
+        }
+        // projectiles
+        A.projectiles = A.projectiles.filter((pr) => pr.t < pr.dur);
+        for (const pr of A.projectiles) {
+          pr.t++;
+          const k = pr.t / pr.dur;
+          const x = pr.x + (pr.tx - pr.x) * k, y = pr.y + (pr.ty - pr.y) * k - Math.sin(k * Math.PI) * 24;
+          ctx.fillStyle = pr.color; ctx.fillRect(x, y, 6, 6);
+          ctx.fillStyle = pr.color + "66"; ctx.fillRect(x - 5, y + 1, 4, 4);
+          if (pr.t === pr.dur - 1 && pr.hit) { A.hurt = 3; }
+        }
+        // floating numbers
+        A.floats = A.floats.filter((f) => f.t < 44);
+        for (const f of A.floats) {
+          f.t++;
+          ctx.fillStyle = f.color; ctx.globalAlpha = clamp(1 - f.t / 44, 0, 1);
+          ctx.font = "16px 'VT323', monospace";
+          ctx.fillText(f.text, f.x, f.y - f.t * 0.8);
+          ctx.globalAlpha = 1;
+        }
+        // boss HP bar
+        A.hpShown += (A.hpTarget - A.hpShown) * 0.06;
+        ctx.fillStyle = "#0d0b18"; ctx.fillRect(400, 12, 260, 18);
+        ctx.fillStyle = C.crimson; ctx.fillRect(402, 14, clamp(A.hpShown, 0, 100) / 100 * 256, 14);
+        ctx.strokeStyle = C.border; ctx.strokeRect(400.5, 12.5, 260, 18);
+        ctx.fillStyle = C.text; ctx.font = "15px 'VT323', monospace";
+        ctx.fillText((phase === "trash" ? "Trash outside " + boss.name : boss.name) + " — " + Math.max(0, Math.round(A.hpShown)) + "%", 404, 44);
+        ctx.restore();
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [lineup.length, phase, pullsUsed, targetBossId]);
+
+  // low-commitment raiders occasionally have to log off mid-night
+  const rollEarlyLeaves = () => {
+    const left = [];
+    if (pullsUsed < 3) return left;
+    for (const p of lineup) {
+      if (p.isPlayer || leftRef.current.has(p.id)) continue;
+      if (late[p.id] === "late" && pullsUsed < 2) continue;
+      if (p.commitment <= 6 && rnd() < (7 - p.commitment) * 0.02) { leftRef.current.add(p.id); left.push(p); }
+    }
+    return left;
+  };
+
+  const doTrashPull = () => {
+    if (phase !== "ready" || pullsUsed >= pullBudget) return;
+    const leavers = rollEarlyLeaves();
+    setPhase("trash");
+    setTimeout(() => {
+      const eff = activeLineup();
+      const avgMech = eff.length ? eff.reduce((a, p) => a + p.mech, 0) / eff.length : 5;
+      const successChance = clamp(0.8 + (avgMech - 6) * 0.02 - Math.max(0, RAID_SIZE - eff.length) * 0.02, 0.5, 0.95);
+      const success = rnd() < successChance;
+      let feedEntry;
+      setSt((s) => {
+        const st2 = structuredClone(s);
+        let text;
+        if (success) {
+          text = `Trash cleared ahead of ${boss.name}. [pull used, no morale change]`;
+        } else {
+          const moraleDelta = -3;
+          for (const pid of lineupIds) { const pl = st2.roster.find((x) => x.id === pid); if (pl) pl.morale = clamp(pl.morale + moraleDelta, 0, 100); }
+          let blameLine = "";
+          if (eff.length && rnd() < 0.35) {
+            const blamed = pick(eff);
+            const bp = st2.roster.find((x) => x.id === blamed.id);
+            if (bp) { bp.morale = clamp(bp.morale - 4, 0, 100); blameLine = ` ${bp.name} is getting side-eye in voice chat. [${bp.name} morale -4]`; }
+          }
+          text = `Trash wipe ahead of ${boss.name}. Someone pulled two packs.${blameLine} [raid morale ${moraleDelta}, pull used]`;
+        }
+        for (const p of leavers) {
+          const pl = st2.roster.find((x) => x.id === p.id);
+          if (pl) pl.known.commitment = true;
+          text += ` ${p.name} had to log off partway through. [${p.name} commitment revealed: ${p.commitment}]`;
+        }
+        st2.log.unshift({ day: st2.day, kind: "raid", text });
+        return st2;
+      });
+      feedEntry = { kind: "trash", success, text: success ? "Trash cleared." : "Trash wipe — mistakes were made." };
+      setAttempts((a) => [...a, feedEntry]);
+      setPullsUsed((n) => n + 1);
+      if (success) setTrashCleared((prev) => new Set(prev).add(targetBossId));
+      setPhase("ready");
+    }, 1000);
+  };
+
+  const doBossPull = () => {
+    if (phase !== "ready" || pullsUsed >= pullBudget || boss.killedThisWeek) return;
+    const leavers = rollEarlyLeaves();
+    const pullNo = pullsUsed + 1;
+    const effLineup = activeLineup();
+    const bossEff = { ...boss, diff: boss.killed ? boss.diff - 1.5 : boss.diff };
+    const res = simAttempt(effLineup, mSpec, bossEff, pullNo, nightHP);
+    setPhase("pulling");
+    const A = animRef.current;
+    A.dead = new Set();
+    const isWipe = res.quality === "wipe" || (!res.kill && res.quality === "progress" && res.dmg < 8);
+    const dur = 2600;
+    const start = Date.now();
+    const volley = setInterval(() => {
+      const t = Date.now() - start;
+      if (t > dur) return;
+      const shooter = pick(effLineup.filter((p) => !A.dead.has(p.id)));
+      if (shooter) {
+        const pos = positions[shooter.id];
+        const role = shooter.isPlayer ? CLASSES.Cleric.specs[mSpec] : shooter.role;
+        if (role === "Healer") {
+          const ally = pick(effLineup);
+          const ap = positions[ally.id];
+          A.projectiles.push({ srcId: shooter.id, x: pos.x + 8, y: pos.y, tx: ap.x + 8, ty: ap.y, color: "#8cf0a0", t: 0, dur: 16, hit: false });
+        } else {
+          A.projectiles.push({ srcId: shooter.id, x: pos.x + 12, y: pos.y + 6, tx: 500 + rnd() * 80, ty: 90 + rnd() * 60, color: role === "Tank" ? "#a0c8ff" : pick(["#ffd24c", "#ff7a4c", "#c88cff", "#fff0a0"]), t: 0, dur: 14, hit: true });
+          A.floats.push({ x: 490 + rnd() * 100, y: 100 + rnd() * 60, text: String(ri(80, 999) * (res.quality === "great" ? 2 : 1)), color: "#ffd24c", t: 0 });
+        }
+      }
+      // boss retaliates
+      if (rnd() < 0.4) {
+        A.shake = 4;
+        const victim = pick(effLineup.filter((p) => !A.dead.has(p.id)));
+        if (victim) A.floats.push({ x: positions[victim.id].x, y: positions[victim.id].y, text: "-" + ri(100, 900), color: "#ff8a8a", t: 0 });
+        if (isWipe && t > dur * 0.4 && rnd() < 0.5) {
+          const v2 = pick(effLineup.filter((p) => !A.dead.has(p.id) && !p.isPlayer));
+          if (v2) A.dead.add(v2.id);
+        }
+      }
+    }, 140);
+    A.hpTarget = clamp(nightHP - res.dmg * 0.7, 0, 100);
+    setTimeout(() => {
+      clearInterval(volley);
+      const A2 = animRef.current;
+      if (isWipe && !res.kill) { effLineup.forEach((p) => A2.dead.add(p.id)); A2.shake = 8; }
+      const newHP = clamp(nightHP - res.dmg, 0, 100);
+      A2.hpTarget = res.kill ? 0 : newHP;
+      if (res.kill) A2.killFall = 1;
+      // commit to game state
+      setSt((s) => {
+        const st2 = structuredClone(s);
+        const b = st2.bosses.find((x) => x.id === targetBossId);
+        b.attempts++;
+        b.learning = clamp(b.learning + res.dmg * 0.06, 0, 20);
+        b.bestPull = Math.max(b.bestPull, 100 - newHP + (res.kill ? 100 : 0) > 100 ? 100 : 100 - newHP);
+        const moraleDelta = -1 - (res.quality === "wipe" ? 2 : 0);
+        for (const pid of lineupIds) {
+          const pl = st2.roster.find((x) => x.id === pid);
+          if (pl) { pl.morale = clamp(pl.morale + (res.kill ? 12 : moraleDelta), 0, 100); if (rnd() < 0.3) pl.known.mech = true; }
+        }
+        let leaveNote = "";
+        for (const p of leavers) {
+          const pl = st2.roster.find((x) => x.id === p.id);
+          if (pl) pl.known.commitment = true;
+          leaveNote += ` ${p.name} had to log off partway through. [${p.name} commitment revealed: ${p.commitment}]`;
+        }
+        if (res.kill) {
+          const firstEverKill = !b.killed;
+          b.killed = true; b.killedThisWeek = true;
+          if (firstEverKill) b.killedDay = st2.day;
+          st2.log.unshift({ day: st2.day, kind: "raid", text: `BOSS KILL: ${b.name} is down after ${b.attempts} career attempts. ${res.line} [raid morale +12, ${b.name} locked until next week's reset]${leaveNote}` });
+        } else {
+          st2.log.unshift({ day: st2.day, kind: "raid", text: `${b.name} pull ${pullNo}: ${res.quality === "wipe" ? "wipe" : "to " + newHP + "%"}. ${res.line} [raid morale ${moraleDelta}]${leaveNote}` });
+        }
+        return st2;
+      });
+      setAttempts((a) => [...a, { kind: "boss", ...res, pullNo }]);
+      setPullsUsed((n) => n + 1);
+      setBossHP((h) => ({ ...h, [targetBossId]: res.kill ? 0 : newHP }));
+      if (res.kill) {
+        setTimeout(() => { setPendingLoot(rollLoot(boss)); setPhase("loot"); }, 900);
+      } else {
+        setPhase("ready");
+        setTimeout(() => { animRef.current.dead = new Set(); }, 1600);
+      }
+    }, dur + 500);
+  };
+
+  const doPull = () => {
+    if (!trashCleared.has(targetBossId)) doTrashPull();
+    else doBossPull();
+  };
+
+  const endNight = () => {
+    setSt((s) => {
+      const st2 = structuredClone(s);
+      st2.raidedToday = true;
+      const bossAttempts = attempts.filter((a) => a.kind === "boss");
+      const wipes = bossAttempts.filter((a) => a.quality === "wipe" || a.quality === "progress").length;
+      if (wipes >= 5 && !bossAttempts.some((a) => a.kill)) {
+        const grump = st2.roster.filter((p) => !p.isPlayer && p.ego >= 6).sort((a, b) => a.morale - b.morale)[0];
+        if (grump) {
+          st2.notifications.unshift({ id: uid(), day: st2.day, type: "post_raid_grumble", icon: "🌧", targetId: grump.id,
+            title: `${grump.name} after ${wipes} wipes: 'we need to talk'`,
+            text: `The raid ended without a kill. ${grump.name} is composing something in #feedback. You can hear the typing from here.`,
+            choices: [{ id: "address", label: "Talk them down tonight" }, { id: "ignore", label: "Sleep. Deal with it tomorrow (or never)" }] });
+        }
+      }
+      const kills = bossAttempts.filter((a) => a.kill).length;
+      st2.log.unshift({ day: st2.day, kind: "raid", text: `Raid called after ${pullsUsed}/${pullBudget} pulls (${kills} kill${kills === 1 ? "" : "s"}). ${kills ? "A good night." : "The Vault remains smug."}` });
+      return st2;
+    });
+    onExit();
+  };
+
+  const assignLoot = (item, playerId) => {
+    setSt((s) => {
+      const st2 = structuredClone(s);
+      const pl = st2.roster.find((x) => x.id === playerId);
+      if (pl) {
+        pl.gear = clamp(pl.gear + 1, 1, 10);
+        pl.morale = clamp(pl.morale + 12, 0, 100);
+        pl.lootCount++;
+        st2.lootDebt[pl.id] = 0;
+        const envious = [];
+        for (const pid of lineupIds) {
+          if (pid === playerId) continue;
+          const other = st2.roster.find((x) => x.id === pid);
+          if (other && item.roles.includes(other.role) && other.ego >= 7) {
+            other.morale = clamp(other.morale - 6, 0, 100);
+            st2.lootDebt[other.id] = (st2.lootDebt[other.id] || 0) + 1;
+            envious.push(other.name);
+          } else if (other && item.roles.includes(other.role)) {
+            st2.lootDebt[other.id] = (st2.lootDebt[other.id] || 0) + 1;
+          }
+        }
+        st2.log.unshift({ day: st2.day, kind: "good", text: `${item.name} → ${pl.name}. ${pl.ego >= 8 ? "They linked it in #general within 4 seconds." : "They said 'oh nice' and meant it."} [${pl.name} gear +1, morale +12${envious.length ? "; " + envious.join(", ") + " morale -6" : ""}]` });
+      }
+      return st2;
+    });
+    setPendingLoot((L) => {
+      const rest = L.filter((x) => x.id !== item.id);
+      if (rest.length === 0) setPhase("ready");
+      return rest;
+    });
+  };
+
+  const kills = attempts.filter((a) => a.kind === "boss" && a.kill).length;
+  const switchableBosses = st.bosses.filter((b, i) => (b.killed || st.bosses.slice(0, i).every((x) => x.killed)) && !b.killedThisWeek);
+  const pullsLeft = pullBudget - pullsUsed;
+  const pullLabel = pullsLeft <= 0 ? "OUT OF PULLS FOR TONIGHT"
+    : boss.killedThisWeek ? "PICK A NEW TARGET"
+    : phase === "trash" ? "… CLEARING TRASH …"
+    : phase === "pulling" ? "… PULLING …"
+    : !trashCleared.has(targetBossId) ? `🧹 CLEAR TRASH (pull ${pullsUsed + 1}/${pullBudget})`
+    : `🔔 PULL BOSS (pull ${pullsUsed + 1}/${pullBudget})`;
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ fontSize: 20, color: C.crimson }}>⚔ RAID NIGHT — {boss.name}{boss.killed && kills === 0 && !boss.killedThisWeek ? " (farm)" : ""}</div>
+        <div style={{ color: C.dim, fontSize: 15 }}>Pulls {pullsUsed}/{pullBudget} · night HP {nightHP}% · learning bonus +{fmt1(boss.learning * 0.12)}</div>
+      </div>
+      {switchableBosses.length >= 1 && (boss.killedThisWeek || switchableBosses.length > 1) && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {switchableBosses.map((b) => (
+            <Btn key={b.id} primary={b.id === targetBossId} disabled={phase === "pulling" || phase === "trash" || phase === "loot"}
+              onClick={() => setTargetBossId(b.id)} style={{ fontSize: 14 }}>
+              {b.name}{trashCleared.has(b.id) ? " ✓trash" : ""}
+            </Btn>
+          ))}
+        </div>
+      )}
+      <canvas ref={canvasRef} width={W} height={H} style={{ width: "100%", maxWidth: W, imageRendering: "pixelated", border: "3px solid " + C.border, boxShadow: "4px 4px 0 #000000aa", background: "#0d0a18" }} />
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <Btn gold disabled={phase !== "ready" || pullsLeft <= 0 || boss.killedThisWeek} onClick={doPull}>{pullLabel}</Btn>
+        <Btn disabled={phase === "pulling" || phase === "trash" || phase === "loot"} onClick={endNight}>🛏 Call it for the night</Btn>
+      </div>
+      <div style={{ ...S.panel, maxHeight: 180, overflowY: "auto" }}>
+        {attempts.length === 0 && <div style={{ color: C.faint }}>The raid is buffed, flasked (mostly), and pretending to read the strat. Trash first, then the boss.</div>}
+        {attempts.slice().reverse().map((a, i) => (
+          <div key={i} style={{ fontSize: 16, padding: "3px 0", color: a.kind === "trash" ? (a.success ? C.dim : "#e0a060") : a.kill ? C.gold : a.quality === "wipe" ? C.crimson : a.quality === "progress" ? "#e0a060" : C.green }}>
+            {a.kind === "trash" ? (a.success ? "🧹 " : "🧹✝ ") : a.kill ? "★ KILL — " : a.quality === "wipe" ? "✝ WIPE — " : a.quality === "progress" ? `▸ ${a.dmg}% — ` : `▸▸ ${a.dmg}% — `}{a.text || a.line}
+          </div>
+        ))}
+      </div>
+      {phase === "loot" && pendingLoot && (
+        <div style={{ position: "fixed", inset: 0, background: "#000000cc", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}>
+          <div style={{ ...S.panel, width: 620, maxWidth: "100%", borderColor: C.gold }}>
+            <div style={{ fontSize: 24, color: C.gold }}>✦ LOOT DROPPED ✦</div>
+            <div style={{ color: C.dim, fontSize: 15, marginBottom: 10 }}>Assign each item. Everyone is watching. Everyone remembers. Forever.</div>
+            {pendingLoot.map((item) => (
+              <div key={item.id} style={{ borderTop: "1px solid " + C.border, padding: "10px 0" }}>
+                <div style={{ fontSize: 19, color: item.quality === "legendary" ? "#ff8a3a" : C.purple }}>{item.name} <span style={{ fontSize: 14, color: C.dim }}>[{item.roles.join("/")}] {item.quality}</span></div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                  {lineup.filter((p) => item.roles.includes(p.isPlayer ? CLASSES.Cleric.specs[mSpec] : p.role)).map((p) => (
+                    <Btn key={p.id} onClick={() => assignLoot(item, p.id)} style={{ fontSize: 15 }}>
+                      {p.name} (g{p.gear}{p.ego >= 8 ? ", ego " + p.ego : ""}{(st.lootDebt[p.id] || 0) >= 2 ? ", owed" : ""})
+                    </Btn>
+                  ))}
+                  <Btn onClick={() => { setSt((s) => { const st2 = structuredClone(s); st2.log.unshift({ day: st2.day, kind: "event", text: `${item.name} was disenchanted in front of everyone. A hush. A shard. A memory. [no gear or morale change]` }); return st2; }); setPendingLoot((L) => { const rest = L.filter((x) => x.id !== item.id); if (rest.length === 0) setPhase("ready"); return rest; }); }} style={{ fontSize: 15 }}>💥 Shard it (chaos)</Btn>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   APP SHELL — tabs, saves, intro, victory
+   ============================================================ */
+const TABS = [
+  { id: "hall", label: "🏰 Guild Hall" },
+  { id: "roster", label: "👥 Roster" },
+  { id: "recruit", label: "📜 Recruit" },
+  { id: "raid", label: "⚔ Raid" },
+  { id: "rivals", label: "🏆 Server" },
+  { id: "log", label: "📖 Chronicle" },
+];
+
+function App() {
+  const [st, setSt] = useState(null);
+  const [tab, setTab] = useState("hall");
+  const [raidCfg, setRaidCfg] = useState(null);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [storageOk, setStorageOk] = useState(true);
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const [nameInput, setNameInput] = useState("");
+  const fileRef = useRef(null);
+
+  // pixel font
+  useEffect(() => {
+    const l = document.createElement("link");
+    l.rel = "stylesheet";
+    l.href = "https://fonts.googleapis.com/css2?family=VT323&display=swap";
+    document.head.appendChild(l);
+    return () => l.remove();
+  }, []);
+
+  // load save
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get(SAVE_KEY);
+        if (r && r.value) {
+          const parsed = JSON.parse(r.value);
+          if (parsed && parsed.v === 1) {
+            if (!parsed.worldGuilds) {
+              parsed.worldGuilds = WORLD_GUILD_DEFS.map((wr, i) => ({
+                ...wr, id: "wg" + i,
+                kills: clamp(Math.floor((wr.power - 5.5) / 1.2), 0, BOSSES.length),
+                lastKillDay: wr.power > 6 ? -ri(1, 15) : -1,
+                heat: 0, poachCooldown: 0,
+              }));
+            }
+            if (!parsed.playerName) { const me = parsed.roster?.find((p) => p.isPlayer); parsed.playerName = me ? me.name : "Mireille"; }
+            if (!parsed.schedule) parsed.schedule = { main: [1, 4], optional: [6] };
+            for (const b of parsed.bosses || []) { if (b.killedThisWeek === undefined) b.killedThisWeek = false; }
+            for (const p of parsed.roster || []) { if (!p.unavailableDays) p.unavailableDays = p.isPlayer ? [] : pickUnavailableDays(); }
+            for (const p of parsed.roster || []) { if (!p.origin) p.origin = "local"; }
+            setSt(parsed); return;
+          }
+        }
+      } catch (e) { /* no save yet, or storage unavailable */ }
+      setNeedsSetup(true);
+    })();
+  }, []);
+
+  const beginGame = () => {
+    const fresh = initialState(nameInput);
+    setSt(fresh); setNeedsSetup(false); setNameInput("");
+  };
+
+  // autosave (debounced)
+  useEffect(() => {
+    if (!st) return;
+    const t = setTimeout(async () => {
+      try { await window.storage.set(SAVE_KEY, JSON.stringify(st)); setStorageOk(true); }
+      catch (e) { setStorageOk(false); }
+    }, 700);
+    return () => clearTimeout(t);
+  }, [st]);
+
+  const exportSave = () => {
+    const blob = new Blob([JSON.stringify(st, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `crimson-oath-day${st.day}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setSaveMsg("Exported. Guard it like a legendary."); setTimeout(() => setSaveMsg(""), 3000);
+  };
+  const importSave = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      try { const parsed = JSON.parse(rd.result); if (parsed && parsed.v === 1) { setSt(parsed); setRaidCfg(null); setSaveMsg("Save loaded. Welcome back, GL."); } else setSaveMsg("That file is not a Crimson Oath save."); }
+      catch { setSaveMsg("Could not read that file."); }
+      setTimeout(() => setSaveMsg(""), 3000);
+    };
+    rd.readAsText(f);
+    e.target.value = "";
+  };
+  const [resetArmed, setResetArmed] = useState(false);
+  const hardReset = () => {
+    if (!resetArmed) { setResetArmed(true); setTimeout(() => setResetArmed(false), 4000); return; }
+    setResetArmed(false);
+    setSt(null); setRaidCfg(null); setTab("hall"); setNeedsSetup(true);
+  };
+
+  if (needsSetup && !st) {
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'VT323', 'Courier New', monospace", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+        <div style={{ ...S.panel, width: 560, maxWidth: "100%", borderColor: C.crimson }}>
+          <div style={{ fontSize: 32, color: C.crimson, textShadow: "2px 2px 0 #000" }}>CRIMSON OATH</div>
+          <div style={{ color: C.gold, fontSize: 18, margin: "6px 0" }}>Season 1: Inherit the Mess</div>
+          <div style={{ fontSize: 18, lineHeight: 1.5, color: C.text, margin: "10px 0" }}>
+            Six days ago, Guild Leader <span style={{ color: C.gold }}>Thunderkeg</span> rage-quit at wipe #23 on Vaultbreaker Hrogg. The guild voted, 7–0, for someone else to deal with it.
+          </div>
+          <div style={{ color: C.dim, fontSize: 15, marginBottom: 6 }}>What do they call you?</div>
+          <input autoFocus value={nameInput} maxLength={18} placeholder="Mireille"
+            onChange={(e) => setNameInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") beginGame(); }}
+            style={{ width: "100%", boxSizing: "border-box", background: "#0d0a18", border: "2px solid " + C.border, color: C.text, fontFamily: "inherit", fontSize: 20, padding: "8px 10px", outline: "none" }} />
+          <div style={{ marginTop: 14 }}>
+            <Btn gold onClick={beginGame}>Accept guild leadership (reluctantly)</Btn>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!st) return <div style={{ background: C.bg, color: C.dim, minHeight: 400, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'VT323', monospace", fontSize: 22 }}>Loading the guild roster… someone is AFK already.</div>;
+
+  const rank = serverRank(st);
+  const myRank = rank.findIndex((g) => g.me) + 1;
+  const allDead = st.bosses.every((b) => b.killed);
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'VT323', 'Courier New', monospace", fontSize: 18, position: "relative" }}>
+      {/* scanlines */}
+      <div style={{ position: "fixed", inset: 0, pointerEvents: "none", background: "repeating-linear-gradient(0deg, transparent 0px, transparent 3px, #00000018 3px, #00000018 4px)", zIndex: 100 }} />
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "12px 12px 60px" }}>
+        {/* header */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, borderBottom: "3px solid " + C.crimsonDark, paddingBottom: 10, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 34, color: C.crimson, textShadow: "3px 3px 0 #000", letterSpacing: 2 }}>CRIMSON OATH</div>
+            <div style={{ color: C.dim, fontSize: 15 }}>guild management for people who read the strat · v1.0</div>
+          </div>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ textAlign: "center" }}><div style={{ color: C.faint, fontSize: 13 }}>DAY</div><div style={{ fontSize: 26 }}>{st.day}</div></div>
+            <div style={{ textAlign: "center" }}><div style={{ color: C.faint, fontSize: 13 }}>ACTIONS</div><div style={{ fontSize: 26, color: st.actions ? C.gold : C.faint }}>{"●".repeat(st.actions)}{"○".repeat(ACTIONS_PER_DAY - st.actions)}</div></div>
+            <div style={{ textAlign: "center" }}><div style={{ color: C.faint, fontSize: 13 }}>RANK</div><div style={{ fontSize: 26, color: myRank <= 3 ? C.gold : C.text }}>#{myRank}</div></div>
+            <Btn primary disabled={!!raidCfg} title={raidCfg ? "Finish the raid first" : ""} onClick={() => { setSt((s) => nextDayTick(s)); setTab("hall"); }}>⏭ Next Day</Btn>
+          </div>
+        </div>
+        {/* tabs */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+          {TABS.map((t) => (
+            <Btn key={t.id} primary={tab === t.id} disabled={!!raidCfg && t.id !== "raid"} onClick={() => setTab(t.id)} style={{ fontSize: 16 }}>
+              {t.label}
+              {t.id === "hall" && st.notifications.length > 0 && <span style={{ color: C.gold }}> ({st.notifications.length})</span>}
+            </Btn>
+          ))}
+        </div>
+        {/* views */}
+        {raidCfg && tab === "raid" ? (
+          <RaidNight st={st} setSt={setSt} cfg={raidCfg} onExit={() => setRaidCfg(null)} />
+        ) : (
+          <>
+            {tab === "hall" && <Dashboard st={st} setSt={setSt} />}
+            {tab === "roster" && <RosterView st={st} setSt={setSt} />}
+            {tab === "recruit" && <RecruitView st={st} setSt={setSt} />}
+            {tab === "raid" && <RaidPlanner st={st} setSt={setSt} onStart={(cfg) => { setRaidCfg(cfg); }} />}
+            {tab === "rivals" && <RivalsView st={st} setSt={setSt} />}
+            {tab === "log" && <LogView st={st} />}
+          </>
+        )}
+        {/* footer: saves */}
+        <div style={{ marginTop: 24, borderTop: "1px solid " + C.border, paddingTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 15 }}>
+          <span style={{ color: C.faint }}>{storageOk ? "💾 autosaves locally" : "⚠ local save unavailable — use export!"}</span>
+          <Btn style={{ fontSize: 14 }} onClick={exportSave}>Export save</Btn>
+          <Btn style={{ fontSize: 14 }} onClick={() => fileRef.current?.click()}>Import save</Btn>
+          <input ref={fileRef} type="file" accept="application/json" style={{ display: "none" }} onChange={importSave} />
+          <Btn style={{ fontSize: 14 }} primary={resetArmed} onClick={hardReset}>{resetArmed ? "Really delete the guild?" : "New game"}</Btn>
+          <span style={{ color: C.gold }}>{saveMsg}</span>
+        </div>
+      </div>
+
+      {/* intro overlay */}
+      {!st.seenIntro && (
+        <div style={{ position: "fixed", inset: 0, background: "#0d0a18f0", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, fontFamily: "'VT323', monospace" }}>
+          <div style={{ ...S.panel, width: 640, maxWidth: "100%", borderColor: C.crimson }}>
+            <div style={{ fontSize: 32, color: C.crimson, textShadow: "2px 2px 0 #000" }}>CRIMSON OATH</div>
+            <div style={{ color: C.gold, fontSize: 18, margin: "6px 0" }}>Season 1: Inherit the Mess</div>
+            <div style={{ fontSize: 18, lineHeight: 1.5, color: C.text }}>
+              Six days ago, Guild Leader <span style={{ color: C.gold }}>Thunderkeg</span> rage-quit at wipe #23 on Vaultbreaker Hrogg. The guild voted for a new leader.<br /><br />
+              They voted for <span style={{ color: C.gold }}>you</span>. {st.playerName || "Mireille"}. The healer who shows up. Every time. For everything. You didn't run for the job. You were simply the only person everyone could agree wasn't the problem.<br /><br />
+              <span style={{ color: C.dim }}>Handle the inbox. Read the room. Fill two roster slots. Kill four bosses before eleven rival guilds do. And whatever happens: do not let Jorveth post his kill-order theory.</span>
+            </div>
+            <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
+              <Btn gold onClick={() => setSt((s) => ({ ...s, seenIntro: true }))}>Accept guild leadership (reluctantly)</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* victory overlay */}
+      {allDead && !st.tierClearedShown && (
+        <div style={{ position: "fixed", inset: 0, background: "#0d0a18f0", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, fontFamily: "'VT323', monospace" }}>
+          <div style={{ ...S.panel, width: 640, maxWidth: "100%", borderColor: C.gold }}>
+            <div style={{ fontSize: 32, color: C.gold, textShadow: "2px 2px 0 #000" }}>✦ THE MOLTEN VAULT: CLEARED ✦</div>
+            <div style={{ fontSize: 18, lineHeight: 1.5, marginTop: 8 }}>
+              Empress Vyxaria is dead. The interest has stopped accruing.<br /><br />
+              Final server standing: <span style={{ color: C.gold }}>#{myRank}</span> of {rank.length}.{" "}
+              {myRank === 1 ? "SERVER FIRST. Someone is already typing 'dead game' in trade chat. Let them." : myRank <= 3 ? "A podium finish. The forum thread is 60% congratulations, 40% conspiracy." : "Not first, but the guild that started this tier wouldn't have finished it at all."}<br /><br />
+              <span style={{ color: C.dim }}>Day {st.day}. Roster: {st.roster.length}. Thunderkeg's pinned message is a distant memory. You can keep playing — farm bosses, build the roster, defend your rank. The Vault always reopens.</span>
+            </div>
+            <div style={{ marginTop: 14 }}>
+              <Btn gold onClick={() => setSt((s) => ({ ...s, tierClearedShown: true }))}>Screenshot it. Keep going.</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>

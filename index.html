@@ -1315,14 +1315,16 @@ function TalkModal({ st, setSt, playerId, onClose }) {
                     }) }, "\uD83D\uDCAC Praise their play (+morale)"),
                 React.createElement(Btn, { disabled: noActions || !!result, onClick: () => act((pl) => {
                         pl.known.coachability = true;
-                        if (pl.coachability >= 6) {
+                        const chance = clamp(0.06 + pl.coachability * 0.085, 0.06, 0.94);
+                        if (rnd() < chance) {
                             pl.roleSkill = clamp(pl.roleSkill + 0.4, 1, 10);
                             pl.morale = clamp(pl.morale + 3, 0, 100);
-                            return `You gave ${pl.name} feedback. They took notes. Actual notes. Role skill improving. [role skill +0.4, morale +3, coachability revealed: ${pl.coachability}]`;
+                            return `You gave ${pl.name} feedback. Something actually landed. Role skill improving. [role skill +0.4, morale +3, coachability revealed: ${pl.coachability}]`;
                         }
-                        pl.morale = clamp(pl.morale - 6, 0, 100);
-                        return `You gave ${pl.name} feedback. They explained why the logs are wrong. The logs are not wrong. [morale -6, coachability revealed: ${pl.coachability}]`;
-                    }) }, "\uD83D\uDCCB Give feedback (reveals Coachability, may train skill)"),
+                        const penalty = -4 - Math.round(clamp(6 - pl.coachability, 0, 6) * 0.7);
+                        pl.morale = clamp(pl.morale + penalty, 0, 100);
+                        return `You gave ${pl.name} feedback. They explained why the logs are wrong. The logs are not wrong. [morale ${penalty}, coachability revealed: ${pl.coachability}]`;
+                    }) }, "\uD83D\uDCCB Give feedback (reveals Coachability; success chance scales with it, low coachability still possible \u2014 just costly)"),
                 React.createElement(Btn, { disabled: noActions || !!result, onClick: () => act((pl) => {
                         pl.known.commitment = true;
                         pl.known.loyalty = true;

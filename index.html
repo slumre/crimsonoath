@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -600,6 +601,23 @@ function openingNotifications() {
 /* ============================================================
    SIMULATION
    ============================================================ */
+/* shared cross-player leaderboard: fastest first-ever kill day, per boss (excludes the starting boss) */
+async function submitLeaderboard(bossId, day, playerName) {
+    try {
+        let existing = null;
+        try {
+            const r = await window.storage.get(`leaderboard:${bossId}`, true);
+            existing = r ? JSON.parse(r.value) : null;
+        }
+        catch (e) {
+            existing = null;
+        }
+        if (!existing || day < existing.day) {
+            await window.storage.set(`leaderboard:${bossId}`, JSON.stringify({ day, name: playerName || "Unknown", at: Date.now() }), true);
+        }
+    }
+    catch (e) { /* shared storage unavailable in this environment — fail quietly */ }
+}
 function computePullBudget(lineup) {
     const nonPlayers = lineup.filter((p) => !p.isPlayer);
     const avgCommit = nonPlayers.length ? nonPlayers.reduce((a, p) => a + p.commitment, 0) / nonPlayers.length : 6;
@@ -1347,8 +1365,39 @@ function RosterView({ st, setSt }) {
     const [open, setOpen] = useState(null);
     const [talk, setTalk] = useState(null);
     const [confirmKick, setConfirmKick] = useState(null);
+    const [showCompare, setShowCompare] = useState(false);
+    const [roleFilter, setRoleFilter] = useState("All");
+    const roleOf = (p) => (p.isPlayer ? "Healer" : p.role);
+    const compareRows = st.roster.filter((p) => roleFilter === "All" || roleOf(p) === roleFilter);
+    const COLS = "150px 120px 46px 50px 50px 46px 60px 55px 46px 55px 55px 55px 65px 150px";
     return (React.createElement("div", { style: { display: "grid", gap: 8 } },
         React.createElement("div", { style: { color: C.dim, fontSize: 15 } }, "Click a row to expand. Hidden stats reveal through raids, conversations and time. People contain surprises. Some are bad."),
+        React.createElement("div", { style: S.panel },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 } },
+                React.createElement("div", { style: { color: C.dim, fontSize: 14 } }, "\uD83D\uDCCA COMPARE ALL MEMBERS \u2014 stats, gear, and no-raid days side by side"),
+                React.createElement(Btn, { onClick: () => setShowCompare((v) => !v), style: { fontSize: 13 } }, showCompare ? "Hide table" : "Show table")),
+            showCompare && (React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", gap: 6, margin: "8px 0", flexWrap: "wrap" } }, ["All", "Tank", "Healer", "DPS"].map((r) => (React.createElement(Btn, { key: r, primary: roleFilter === r, onClick: () => setRoleFilter(r), style: { fontSize: 13 } }, r)))),
+                React.createElement("div", { style: { overflowX: "auto" } },
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: COLS, gap: 4, fontSize: 13, minWidth: 900, alignItems: "center" } },
+                        ["Name", "Class/Spec", "Role", "Skill", "Mech", "Gear", "Morale", "Reliab", "Ego", "Coach", "Toxic", "Loyal", "Commit", "Can't raid"].map((h) => (React.createElement("div", { key: h, style: { color: C.faint, borderBottom: "1px solid " + C.border, paddingBottom: 4 } }, h))),
+                        compareRows.map((p) => (React.createElement(React.Fragment, { key: p.id },
+                            React.createElement("div", { style: { color: p.isPlayer ? C.gold : C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, p.name),
+                            React.createElement("div", { style: { color: CLASSES[p.cls].color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, p.spec),
+                            React.createElement("div", null,
+                                ROLE_ICON[roleOf(p)],
+                                p.isPlayer ? " (flex)" : ""),
+                            React.createElement("div", null, Math.round(p.roleSkill)),
+                            React.createElement("div", null, p.known.mech ? Math.round(p.mech) : "?"),
+                            React.createElement("div", null, p.gear),
+                            React.createElement("div", { style: { color: moraleColor(p.morale) } }, p.morale),
+                            React.createElement("div", null, p.reliability),
+                            React.createElement("div", null, p.ego),
+                            React.createElement("div", null, p.known.coachability ? p.coachability : "?"),
+                            React.createElement("div", null, p.known.toxicity ? p.toxicity : "?"),
+                            React.createElement("div", null, p.known.loyalty ? p.loyalty : "?"),
+                            React.createElement("div", null, p.known.commitment ? p.commitment : "?"),
+                            React.createElement("div", { style: { color: C.faint, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, p.isPlayer ? "—" : (p.unavailableDays.length ? p.unavailableDays.map((d) => WEEKDAYS[d]).join(", ") : "none")))))))))),
         st.roster.map((p) => {
             const isOpen = open === p.id;
             return (React.createElement("div", { key: p.id, style: { ...S.panel, padding: 8, borderColor: isOpen ? C.borderLit : C.border } },
@@ -1475,7 +1524,54 @@ function RecruitView({ st, setSt }) {
 function RivalsView({ st, setSt }) {
     const rank = serverRank(st);
     const myKills = st.bosses.filter((b) => b.killed).length;
+    const boardBosses = st.bosses.slice(1); // excludes the starting boss
+    const [board, setBoard] = useState(null);
+    const [boardLoading, setBoardLoading] = useState(true);
+    const [isShared, setIsShared] = useState(null); // null = unknown yet, true = real shared backend, false = local-only fallback
+    const loadBoard = () => {
+        setBoardLoading(true);
+        (async () => {
+            const entries = {};
+            for (const b of boardBosses) {
+                try {
+                    const r = await window.storage.get(`leaderboard:${b.id}`, true);
+                    entries[b.id] = r ? JSON.parse(r.value) : null;
+                }
+                catch (e) {
+                    entries[b.id] = null;
+                }
+            }
+            setBoard(entries);
+            setBoardLoading(false);
+        })();
+    };
+    useEffect(() => {
+        (async () => {
+            try {
+                const r = await window.storage.set("leaderboard_probe", String(Date.now()), true);
+                setIsShared(!!(r && r.shared));
+            }
+            catch (e) {
+                setIsShared(false);
+            }
+        })();
+        loadBoard();
+    }, []);
     return (React.createElement("div", { style: { display: "grid", gap: 10 } },
+        React.createElement("div", { style: S.panel },
+            React.createElement("div", { style: { color: C.gold, fontSize: 18 } }, isShared === false ? "📋 PERSONAL BEST" : "🏆 SHARED HALL OF FAME"),
+            React.createElement("div", { style: { color: C.dim, fontSize: 14, marginBottom: 8 } }, isShared === false
+                ? "Fastest first-ever kill (by in-game day) for each boss beyond Vaultbreaker — tracked locally in this browser only. It isn't synced with anyone else on this build."
+                : isShared === true
+                    ? "Fastest first-ever kill (by in-game day) for each boss beyond Vaultbreaker, shared across everyone playing this artifact."
+                    : "Checking leaderboard mode…"),
+            boardLoading ? React.createElement("div", { style: { color: C.faint } }, "Loading\u2026") : boardBosses.map((b) => {
+                const rec = board === null || board === void 0 ? void 0 : board[b.id];
+                return (React.createElement("div", { key: b.id, style: { display: "flex", justifyContent: "space-between", padding: "5px 0", borderTop: "1px solid " + C.border, fontSize: 16 } },
+                    React.createElement("span", null, b.name),
+                    React.createElement("span", { style: { color: rec ? C.gold : C.faint } }, rec ? `Day ${rec.day} — ${rec.name}` : "No record yet — be the first")));
+            }),
+            React.createElement(Btn, { onClick: loadBoard, style: { marginTop: 8, fontSize: 13 } }, "\uD83D\uDD04 Refresh")),
         React.createElement("div", { style: { color: C.dim, fontSize: 15 } },
             "Server progression race \u2014 The Molten Vault (",
             st.bosses.length,
@@ -2090,8 +2186,12 @@ function RaidNight({ st, setSt, cfg, onExit }) {
                     const firstEverKill = !b.killed;
                     b.killed = true;
                     b.killedThisWeek = true;
-                    if (firstEverKill)
+                    if (firstEverKill) {
                         b.killedDay = st2.day;
+                        const bossIndex = st2.bosses.findIndex((bb) => bb.id === b.id);
+                        if (bossIndex > 0)
+                            submitLeaderboard(b.id, st2.day, st2.playerName);
+                    }
                     st2.log.unshift({ day: st2.day, kind: "raid", text: `BOSS KILL: ${b.name} is down after ${b.attempts} career attempts. ${res.line} [raid morale +12, ${b.name} locked until next week's reset]${leaveNote}` });
                 }
                 else {

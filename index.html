@@ -730,7 +730,7 @@ function rollAvailability(roster, day, schedule) {
         else
             showChance -= 0.30; // raiding on an unscheduled day — most people just aren't around
         if (p.unavailableDays && p.unavailableDays.includes(weekday))
-            showChance -= 0.55;
+            showChance = Math.min(showChance, 0.1); // personal blackout day — a hard cap, not just a penalty, so it stays rare regardless of how good their other stats are
         showChance = clamp(showChance, 0.03, 0.97);
         const r = rnd();
         if (r < showChance)
@@ -1361,11 +1361,10 @@ function TalkModal({ st, setSt, playerId, onClose }) {
             React.createElement("div", { style: { marginTop: 12, display: "flex", justifyContent: "flex-end" } },
                 React.createElement(Btn, { onClick: onClose }, result ? "Done" : "Close")))));
 }
-function RosterView({ st, setSt }) {
+function RosterView({ st, setSt, compareOpen, setCompareOpen }) {
     const [open, setOpen] = useState(null);
     const [talk, setTalk] = useState(null);
     const [confirmKick, setConfirmKick] = useState(null);
-    const [showCompare, setShowCompare] = useState(false);
     const [roleFilter, setRoleFilter] = useState("All");
     const roleOf = (p) => (p.isPlayer ? "Healer" : p.role);
     const compareRows = st.roster.filter((p) => roleFilter === "All" || roleOf(p) === roleFilter);
@@ -1375,8 +1374,8 @@ function RosterView({ st, setSt }) {
         React.createElement("div", { style: S.panel },
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 } },
                 React.createElement("div", { style: { color: C.dim, fontSize: 14 } }, "\uD83D\uDCCA COMPARE ALL MEMBERS \u2014 stats, gear, and no-raid days side by side"),
-                React.createElement(Btn, { onClick: () => setShowCompare((v) => !v), style: { fontSize: 13 } }, showCompare ? "Hide table" : "Show table")),
-            showCompare && (React.createElement(React.Fragment, null,
+                React.createElement(Btn, { onClick: () => setCompareOpen((v) => !v), style: { fontSize: 13 } }, compareOpen ? "Hide table" : "Show table")),
+            compareOpen && (React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", gap: 6, margin: "8px 0", flexWrap: "wrap" } }, ["All", "Tank", "Healer", "DPS"].map((r) => (React.createElement(Btn, { key: r, primary: roleFilter === r, onClick: () => setRoleFilter(r), style: { fontSize: 13 } }, r)))),
                 React.createElement("div", { style: { overflowX: "auto" } },
                     React.createElement("div", { style: { display: "grid", gridTemplateColumns: COLS, gap: 4, fontSize: 13, minWidth: 900, alignItems: "center" } },
@@ -2351,6 +2350,7 @@ function App() {
     const [storageOk, setStorageOk] = useState(true);
     const [needsSetup, setNeedsSetup] = useState(false);
     const [nameInput, setNameInput] = useState("");
+    const [rosterCompareOpen, setRosterCompareOpen] = useState(false);
     const fileRef = useRef(null);
     // pixel font
     useEffect(() => {
@@ -2509,21 +2509,32 @@ function App() {
                         React.createElement("div", { style: { fontSize: 26, color: st.actions ? C.gold : C.faint } },
                             "●".repeat(st.actions),
                             "○".repeat(ACTIONS_PER_DAY - st.actions))),
-                    React.createElement("div", { style: { textAlign: "center" } },
-                        React.createElement("div", { style: { color: C.faint, fontSize: 13 } }, "RANK"),
-                        React.createElement("div", { style: { fontSize: 26, color: myRank <= 3 ? C.gold : C.text } },
-                            "#",
-                            myRank)),
                     React.createElement(Btn, { primary: true, disabled: !!raidCfg, title: raidCfg ? "Finish the raid first" : "", onClick: () => { setSt((s) => nextDayTick(s)); setTab("hall"); } }, "\u23ED Next Day"))),
-            React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 } }, TABS.map((t) => (React.createElement(Btn, { key: t.id, primary: tab === t.id, disabled: !!raidCfg && t.id !== "raid", onClick: () => setTab(t.id), style: { fontSize: 16 } },
-                t.label,
-                t.id === "hall" && st.notifications.length > 0 && React.createElement("span", { style: { color: C.gold } },
-                    " (",
-                    st.notifications.length,
-                    ")"))))),
+            React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 } }, TABS.map((t) => {
+                let sub = null;
+                if (t.id === "hall") {
+                    if (st.notifications.length > 0)
+                        sub = `${st.notifications.length} message${st.notifications.length === 1 ? "" : "s"}`;
+                }
+                else if (t.id === "roster")
+                    sub = `${st.roster.length}/${ROSTER_CAP}`;
+                else if (t.id === "recruit")
+                    sub = `${st.applicants.length} applicant${st.applicants.length === 1 ? "" : "s"}`;
+                else if (t.id === "raid") {
+                    const rw = weekdayOf(st.day);
+                    const rk = scheduleKind(st.schedule, rw);
+                    const status = st.raidedToday ? "completed" : rk === "main" ? "main" : rk === "optional" ? "optional" : "no plans";
+                    sub = `${WEEKDAYS[rw]} (${status})`;
+                }
+                else if (t.id === "rivals")
+                    sub = `rank #${myRank}`;
+                return (React.createElement(Btn, { key: t.id, primary: tab === t.id, disabled: !!raidCfg && t.id !== "raid", onClick: () => setTab(t.id), style: { fontSize: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 1, lineHeight: 1.1, padding: "7px 12px" } },
+                    React.createElement("span", null, t.label),
+                    sub && React.createElement("span", { style: { fontSize: 12, fontWeight: "normal", color: tab === t.id ? "#00000099" : C.faint } }, sub)));
+            })),
             raidCfg && tab === "raid" ? (React.createElement(RaidNight, { st: st, setSt: setSt, cfg: raidCfg, onExit: () => setRaidCfg(null) })) : (React.createElement(React.Fragment, null,
                 tab === "hall" && React.createElement(Dashboard, { st: st, setSt: setSt }),
-                tab === "roster" && React.createElement(RosterView, { st: st, setSt: setSt }),
+                tab === "roster" && React.createElement(RosterView, { st: st, setSt: setSt, compareOpen: rosterCompareOpen, setCompareOpen: setRosterCompareOpen }),
                 tab === "recruit" && React.createElement(RecruitView, { st: st, setSt: setSt }),
                 tab === "raid" && React.createElement(RaidPlanner, { st: st, setSt: setSt, onStart: (cfg) => { setRaidCfg(cfg); } }),
                 tab === "rivals" && React.createElement(RivalsView, { st: st, setSt: setSt }),

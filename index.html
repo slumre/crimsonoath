@@ -2094,7 +2094,7 @@ function RaidNight({ st, setSt, cfg, onExit }) {
                 return st2;
             });
             feedEntry = { kind: "trash", success, text: success ? "Trash cleared." : "Trash wipe — mistakes were made." };
-            setAttempts((a) => [...a, feedEntry]);
+            setAttempts((a) => [...a, feedEntry, ...leavers.map((p) => ({ kind: "leave", text: `${p.name} had to log off partway through. [commitment revealed: ${p.commitment}]` }))]);
             setPullsUsed((n) => n + 1);
             if (success)
                 setTrashCleared((prev) => new Set(prev).add(targetBossId));
@@ -2198,7 +2198,7 @@ function RaidNight({ st, setSt, cfg, onExit }) {
                 }
                 return st2;
             });
-            setAttempts((a) => [...a, { kind: "boss", ...res, pullNo }]);
+            setAttempts((a) => [...a, { kind: "boss", ...res, pullNo }, ...leavers.map((p) => ({ kind: "leave", text: `${p.name} had to log off partway through. [commitment revealed: ${p.commitment}]` }))]);
             setPullsUsed((n) => n + 1);
             setBossHP((h) => ({ ...h, [targetBossId]: res.kill ? 0 : newHP }));
             if (res.kill) {
@@ -2304,8 +2304,8 @@ function RaidNight({ st, setSt, cfg, onExit }) {
             React.createElement(Btn, { disabled: phase === "pulling" || phase === "trash" || phase === "loot", onClick: endNight }, "\uD83D\uDECF Call it for the night")),
         React.createElement("div", { style: { ...S.panel, maxHeight: 180, overflowY: "auto" } },
             attempts.length === 0 && React.createElement("div", { style: { color: C.faint } }, "The raid is buffed, flasked (mostly), and pretending to read the strat. Trash first, then the boss."),
-            attempts.slice().reverse().map((a, i) => (React.createElement("div", { key: i, style: { fontSize: 16, padding: "3px 0", color: a.kind === "trash" ? (a.success ? C.dim : "#e0a060") : a.kill ? C.gold : a.quality === "wipe" ? C.crimson : a.quality === "progress" ? "#e0a060" : C.green } },
-                a.kind === "trash" ? (a.success ? "🧹 " : "🧹✝ ") : a.kill ? "★ KILL — " : a.quality === "wipe" ? "✝ WIPE — " : a.quality === "progress" ? `▸ ${a.dmg}% — ` : `▸▸ ${a.dmg}% — `,
+            attempts.slice().reverse().map((a, i) => (React.createElement("div", { key: i, style: { fontSize: 16, padding: "3px 0", color: a.kind === "leave" ? "#e0a060" : a.kind === "trash" ? (a.success ? C.dim : "#e0a060") : a.kill ? C.gold : a.quality === "wipe" ? C.crimson : a.quality === "progress" ? "#e0a060" : C.green } },
+                a.kind === "leave" ? "🚪 " : a.kind === "trash" ? (a.success ? "🧹 " : "🧹✝ ") : a.kill ? "★ KILL — " : a.quality === "wipe" ? "✝ WIPE — " : a.quality === "progress" ? `▸ ${a.dmg}% — ` : `▸▸ ${a.dmg}% — `,
                 a.text || a.line)))),
         phase === "loot" && pendingLoot && (React.createElement("div", { style: { position: "fixed", inset: 0, background: "#000000cc", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 } },
             React.createElement("div", { style: { ...S.panel, width: 620, maxWidth: "100%", borderColor: C.gold } },
